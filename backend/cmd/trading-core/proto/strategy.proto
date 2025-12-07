@@ -1,0 +1,21 @@
+syntax = "proto3";
+package strategy;
+option go_package = "trading-core/proto/strategy";
+
+service StrategyService {
+  rpc OnTick(TickData) returns (Signal) {}
+}
+
+message TickData {
+  string symbol = 1;
+  double price = 2;
+  map<string, double> indicators = 3;
+}
+
+message Signal {
+  string action = 1;  // BUY, SELL, HOLD
+  string symbol = 2;
+  double size = 3;
+  string note = 4;
+}
+

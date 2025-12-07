@@ -1,0 +1,4 @@
+grpcio>=1.67.0
+grpcio-tools>=1.67.0
+pydantic>=2.9.0
+protobuf>=5.28.0

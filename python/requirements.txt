@@ -1,0 +1,27 @@
+# ========================================
+# DES Trading System V2.0 - Python Dependencies
+# ========================================
+
+# Core gRPC dependencies
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+
+# HTTP requests (for alert system)
+requests>=2.31.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Logging and utilities
+colorlog>=6.8.0
+
+# Optional: Data analysis (for strategy development)
+# Uncomment if needed:
+# numpy>=1.26.0
+# pandas>=2.1.0
+
+# Optional: Technical indicators (for strategy development)
+# Uncomment if needed:
+# ta-lib>=0.4.28
+# pandas-ta>=0.3.14b0

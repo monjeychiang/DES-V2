@@ -1,0 +1,23 @@
+strategies:
+  - id: "550e8400-e29b-41d4-a716-446655440000"
+    name: "BTC MA Cross (1h)"
+    type: "ma_cross"
+    symbol: "BTCUSDT"
+    interval: "1h"
+    is_active: true
+    parameters:
+      fast: 10
+      slow: 30
+      size: 0.01
+
+  - id: "550e8400-e29b-41d4-a716-446655440001"
+    name: "ETH RSI (15m)"
+    type: "rsi"
+    symbol: "ETHUSDT"
+    interval: "15m"
+    is_active: true
+    parameters:
+      period: 14
+      oversold: 30
+      overbought: 70
+      size: 0.1
