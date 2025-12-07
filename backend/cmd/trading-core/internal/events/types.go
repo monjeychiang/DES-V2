@@ -14,4 +14,5 @@ const (
 	EventOrderRejected        Event = "order.rejected"
 	EventOrderFilled          Event = "order.filled"
 	EventOrderPartiallyFilled Event = "order.partially_filled"
+	EventStrategyError        Event = "strategy.error"
 )

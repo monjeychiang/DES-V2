@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -37,20 +38,30 @@ func NewDryRunExecutor(mode ExecutionMode, real *Executor, initialBalance float6
 }
 
 // Execute routes orders to either real or mock executor.
-func (d *DryRunExecutor) Execute(ctx context.Context, o Order) {
+func (d *DryRunExecutor) Execute(ctx context.Context, o Order) error {
 	if d.mode == ModeDryRun {
 		// 1) Persist order to DB and emit order events, but do NOT hit exchange.
 		if d.realExec != nil {
 			// Temporarily skip any external gateway so Executor.Handle only stores to DB.
 			d.realExec.SkipExchange = true
-			d.realExec.Handle(ctx, o)
+			// We ignore error here since Handle might fail if gateway lookup fails (which is fine in dry run skipping)
+			// But if DB fails, we should probably know.
+			// Currently Handle returns error if gateway lookup fails but we want to ignore that in DryRun?
+			// Actually Handle checks SkipExchange first and doesn't lookup gateway.
+			// So if Handle fails here, it's likely DB error.
+			if err := d.realExec.Handle(ctx, o); err != nil {
+				log.Printf("DRY-RUN: Warning, persistence failed: %v", err)
+				// We don't block dry-run execution on DB failure, maybe?
+				// But let's return error if we want to be strict.
+				// For now let's just log and continue simulation.
+			}
 			d.realExec.SkipExchange = false
 		}
 
 		// 2) Run in-memory simulation for PnL / balance / positions.
 		if err := d.mockExec.Execute(o); err != nil {
 			fmt.Printf("DRY-RUN execute error: %v\n", err)
-			return
+			return err
 		}
 
 		// 3) Store a synthetic trade + emit filled event to exercise downstream logic.
@@ -84,9 +95,9 @@ func (d *DryRunExecutor) Execute(ctx context.Context, o Order) {
 				Price:  o.Price,
 			})
 		}
-		return
+		return nil
 	}
-	d.realExec.Handle(ctx, o)
+	return d.realExec.Handle(ctx, o)
 }
 
 // PrintState prints current mock positions and balance for inspection.

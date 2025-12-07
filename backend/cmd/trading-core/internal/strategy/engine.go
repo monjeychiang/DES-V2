@@ -4,7 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
+	"runtime"
+	"runtime/debug"
+	"sync"
+	"time"
 
 	"trading-core/internal/data"
 	"trading-core/internal/events"
@@ -19,15 +24,27 @@ type Engine struct {
 	ctx         Context
 	db          *sql.DB
 	dataService *data.HistoricalDataService
+
+	// Worker pool for parallel strategy execution (V2)
+	workerPool chan struct{}
+	poolSize   int
 }
 
 func NewEngine(bus *events.Bus, db *sql.DB, ctx Context) *Engine {
+	// Pool size: 2x CPU cores, minimum 4
+	poolSize := runtime.NumCPU() * 2
+	if poolSize < 4 {
+		poolSize = 4
+	}
+
 	return &Engine{
 		paused:      make(map[string]bool),
 		bus:         bus,
 		db:          db,
 		ctx:         ctx,
-		dataService: data.NewHistoricalDataService(false), // Default to mainnet for data
+		dataService: data.NewHistoricalDataService(false),
+		workerPool:  make(chan struct{}, poolSize),
+		poolSize:    poolSize,
 	}
 }
 
@@ -208,7 +225,7 @@ func (e *Engine) handleTick(msg any) {
 
 	switch v := msg.(type) {
 	case market.Kline:
-		symbol = ""
+		symbol = v.Symbol
 		price = v.Close
 	case struct {
 		Symbol string
@@ -218,27 +235,97 @@ func (e *Engine) handleTick(msg any) {
 		price = v.Close
 	}
 
+	if symbol == "" || price <= 0 {
+		return
+	}
+
 	indVals := map[string]float64{}
-	if e.ctx.Indicators != nil && price > 0 {
+	if e.ctx.Indicators != nil {
 		indVals = e.ctx.Indicators.Update(symbol, price)
 	}
 
+	// Collect non-paused strategies
+	activeStrategies := make([]Strategy, 0, len(e.strategies))
 	for _, s := range e.strategies {
-		if e.paused[s.ID()] {
-			continue // Skip paused strategies
-		}
-
-		sig, err := s.OnTick(symbol, price, indVals)
-		if err != nil {
-			log.Printf("strategy %s error: %v", s.Name(), err)
-			continue
-		}
-		if sig != nil {
-			sig.StrategyID = s.ID()
-			log.Printf("strategy %s signal: %+v", s.Name(), sig)
-			e.bus.Publish(events.EventStrategySignal, *sig)
+		if !e.paused[s.ID()] {
+			activeStrategies = append(activeStrategies, s)
 		}
 	}
+
+	if len(activeStrategies) == 0 {
+		return
+	}
+
+	// Process strategies in parallel with worker pool (V2)
+	var wg sync.WaitGroup
+	signals := make(chan *Signal, len(activeStrategies))
+
+	for _, s := range activeStrategies {
+		wg.Add(1)
+
+		// Acquire worker slot (limits concurrent goroutines)
+		e.workerPool <- struct{}{}
+
+		go func(strat Strategy) {
+			defer wg.Done()
+			defer func() { <-e.workerPool }() // Release worker slot
+			defer e.recoverFromPanic(strat.ID())
+
+			sig, err := strat.OnTick(symbol, price, indVals)
+			if err != nil {
+				log.Printf("strategy %s error: %v", strat.Name(), err)
+				return
+			}
+			if sig != nil {
+				sig.StrategyID = strat.ID()
+				signals <- sig
+			}
+		}(s)
+	}
+
+	// Close signals channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(signals)
+	}()
+
+	// Publish all signals
+	for sig := range signals {
+		log.Printf("strategy %s signal: %+v", sig.StrategyID, sig)
+		e.bus.Publish(events.EventStrategySignal, *sig)
+	}
+}
+
+// recoverFromPanic handles panics in strategy execution (V2 P1-A).
+func (e *Engine) recoverFromPanic(strategyID string) {
+	if r := recover(); r != nil {
+		stack := debug.Stack()
+		log.Printf("❌ Strategy %s panicked: %v\n%s", strategyID, r, stack)
+
+		// Auto-pause the panicking strategy
+		e.paused[strategyID] = true
+
+		// Update database
+		if e.db != nil {
+			_, _ = e.db.Exec("UPDATE strategy_instances SET status = 'ERROR' WHERE id = ?", strategyID)
+		}
+
+		// Publish error event
+		e.bus.Publish(events.EventStrategyError, StrategyError{
+			StrategyID: strategyID,
+			Error:      fmt.Sprintf("%v", r),
+			Stack:      string(stack),
+			Timestamp:  time.Now(),
+		})
+	}
+}
+
+// StrategyError represents a strategy execution error event.
+type StrategyError struct {
+	StrategyID string    `json:"strategy_id"`
+	Error      string    `json:"error"`
+	Stack      string    `json:"stack"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // Lifecycle Methods

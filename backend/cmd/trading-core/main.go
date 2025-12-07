@@ -19,6 +19,7 @@ import (
 	"trading-core/internal/events"
 	"trading-core/internal/indicators"
 	"trading-core/internal/market"
+	"trading-core/internal/monitor"
 	"trading-core/internal/order"
 	"trading-core/internal/reconciliation"
 	"trading-core/internal/risk"
@@ -189,6 +190,11 @@ func main() {
 		log.Println("⚠ Running in DRY-RUN mode (orders will NOT hit exchange)")
 	}
 	dryRunner := order.NewDryRunExecutor(mode, exec, cfg.DryRunInitialBalance)
+	asyncExec := order.NewAsyncExecutorWithDryRun(dryRunner, 4) // V2 P0-B: Async Execution
+
+	// System metrics for monitoring
+	sysMetrics := monitor.NewSystemMetrics()
+	log.Println("✓ System metrics initialized")
 
 	// Reconciliation service (only in production mode)
 	if !cfg.DryRun {
@@ -543,8 +549,21 @@ func main() {
 	}()
 
 	go orderQueue.Drain(ctx, func(o order.Order) {
-		dryRunner.Execute(ctx, o)
+		asyncExec.ExecuteAsync(ctx, o) // V2 P0-B: Async Execution
 	})
+
+	// Monitor async execution results (V2 P0-B)
+	go func() {
+		for result := range asyncExec.Results() {
+			if !result.Success {
+				log.Printf("❌ Async execution failed for order %s: %v", result.OrderID, result.Error)
+				sysMetrics.IncrementErrors()
+			} else {
+				sysMetrics.IncrementOrders()
+			}
+			sysMetrics.OrderLatency.RecordDuration(result.Latency)
+		}
+	}()
 
 	// Start Spot User Data Stream (only when using spot gateway)
 	if cfg.EnableBinanceTrading && cfg.BinanceAPIKey != "" && cfg.BinanceAPISecret != "" && !cfg.DryRun {
@@ -581,6 +600,8 @@ func main() {
 		riskMgr,
 		balanceMgr,
 		stratEngine,
+		sysMetrics,
+		orderQueue,
 		api.SystemMeta{
 			DryRun:      cfg.DryRun,
 			Venue:       venue,

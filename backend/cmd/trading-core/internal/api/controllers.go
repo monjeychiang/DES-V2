@@ -590,3 +590,30 @@ func (s *Server) canAccessStrategy(c *gin.Context, strategyID string) bool {
 	}
 	return true
 }
+
+// getMetrics returns system performance metrics.
+func (s *Server) getMetrics(c *gin.Context) {
+	if s.Metrics == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "metrics not available"})
+		return
+	}
+	snapshot := s.Metrics.GetSnapshot()
+	c.JSON(http.StatusOK, snapshot)
+}
+
+// getQueueMetrics returns order queue statistics.
+func (s *Server) getQueueMetrics(c *gin.Context) {
+	if s.OrderQueue == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order queue not available"})
+		return
+	}
+	metrics := s.OrderQueue.GetMetrics()
+	c.JSON(http.StatusOK, gin.H{
+		"enqueued":       metrics.Enqueued,
+		"dequeued":       metrics.Dequeued,
+		"overflowed":     metrics.Overflowed,
+		"dropped":        metrics.Dropped,
+		"current_depth":  s.OrderQueue.Len(),
+		"overflow_depth": s.OrderQueue.OverflowLen(),
+	})
+}

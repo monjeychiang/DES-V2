@@ -1,348 +1,66 @@
 # 交易 API 錯誤檢查報告
 
-**檢查日期**: 2025-11-27  
+**檢查日期**: 2025-12-08 (更新)  
+**上次檢查**: 2025-11-27  
 **檢查範圍**: 所有交易相關 API (現貨 + U本位合約 + 幣本位合約)
 
 ---
 
-## 🔍 發現的問題總結
+## 📊 總結
+
+### 整體評價: **A (95分)** ⬆️ (原 B+ 85分)
+
+**重大改進**:
+- ✅ 所有止損/止盈訂單類型已實作
+- ✅ User Data Stream 完整實作 (現貨+期貨)
+- ✅ 速率限制檢測與保護
+- ✅ 時間同步機制
+- ✅ 批量撤單功能
+
+**剩餘優化項目**:
+- ⚠️ 批量下單 (期貨)
+- ⚠️ 高級委託策略 (OCO)
+
+---
+
+## 🔍 問題狀態追蹤
 
 ### 嚴重性分級
 - 🔴 **Critical**: 導致無法交易或安全問題
 - 🟡 **Warning**: 功能不完整但可基本使用
 - 🟢 **Info**: 優化建議
+- ✅ **Resolved**: 已解決
 
 ---
 
-## ✅ 正確的部分 (先肯定)
+## ✅ 上次檢查後已解決的問題
 
-### 簽名實現 - 完全正確 ✅
+### 1. ✅ 止損/止盈訂單類型 (原 🟡)
 
-查看 `pkg/exchange/binance/binance.go` 第 181-184 行：
+**狀態**: 已完全實作
+
+**檔案**: `pkg/exchanges/common/types.go`
 
 ```go
-func sign(data, secret string) string {
-    h := hmac.New(sha256.New, []byte(secret))
-    h.Write([]byte(data))
-    return hex.EncodeToString(h.Sum(nil))
-}
-```
-
-**驗證結果**:
-- ✅ 使用 HMAC-SHA256 算法（符合官方規範）
-- ✅ Hex 編碼輸出
-- ✅ 簽名邏輯完全正確
-
-### 簽名請求處理 - 正確 ✅
-
-`doSigned()` 方法處理：
-- ✅ 正確添加 `timestamp` 和 `recvWindow`
-- ✅ GET/DELETE 請求簽名在 query string
-- ✅ POST 請求簽名在 request body
-- ✅ X-MBX-APIKEY header 正確設置
-
-### 基礎訂單功能 - 可用 ✅
-
-- ✅ 市價單 (MARKET)
-- ✅ 限價單 (LIMIT)
-- ✅ TimeInForce (GTC/IOC/FOK)
-- ✅ 下單 (SubmitOrder)
-- ✅ 撤單 (CancelOrder)
-- ✅ 查詢訂單 (GetOrder, GetOpenOrders, GetAllOrders)
-- ✅ 賬戶查詢 (GetAccountInfo)
-
----
-
-## 🟡 現貨交易 API 問題 (`pkg/exchange/binance/`)
-
-### 1. 🟡 缺少止損/止盈訂單類型
-
-**當前支持**:
-- ✅ MARKET
-- ✅ LIMIT
-
-**缺少的訂單類型**:
-- ❌ `STOP_LOSS` - 止損市價單
-- ❌ `STOP_LOSS_LIMIT` - 止損限價單
-- ❌ `TAKE_PROFIT` - 止盈市價單
-- ❌ `TAKE_PROFIT_LIMIT` - 止盈限價單
-- ❌ `LIMIT_MAKER` - 只做 Maker 的限價單
-
-**影響**:
-- 無法設置自動止損/止盈
-- 需要手動監控價格並下單
-- 策略風控能力受限
-
-**官方參數** (止損限價單示例):
-```
-type: STOP_LOSS_LIMIT
-price: 69500         # 限價價格
-stopPrice: 70000     # 觸發價格
-timeInForce: GTC
-```
-
----
-
-### 2. 🟡 OrderRequest 缺少字段
-
-**當前 OrderRequest** (`types.go`):
-```go
-type OrderRequest struct {
-    Symbol      string
-    Side        Side
-    Type        OrderType
-    Qty         float64
-    Price       float64
-    TimeInForce TimeInForce
-    ClientID    string
-    ReduceOnly  bool
-    PositionSide string
-    Market       MarketType
-    Leverage     int
-}
-```
-
-**缺少字段**:
-- ❌ `StopPrice` (float64) - 止損/止盈觸發價格
-- ❌ `IcebergQty` (float64) - 冰山訂單可見數量
-- ❌ `StopLimitPrice` (float64) - 止損限價單的限價
-- ❌ `StopLimitTimeInForce` (TimeInForce) - 止損限價單的 TIF
-
----
-
-### 3. 🟡 缺少冰山訂單支持
-
-**什麼是冰山訂單**:
-- 將大單分成多個小單
-- 僅顯示部分數量在訂單簿
-- 隱藏真實交易意圖
-
-**缺少參數**:
-- `icebergQty` - 可見數量
-
-**使用限制**:
-- 冰山訂單必須是 LIMIT 類型
-- timeInForce 必須是 GTC
-
----
-
-### 4. 🟢 缺少批量撤單方法
-
-**當前**:
-```go
-CancelOrder(ctx, symbol, exchangeOrderID) // 單個撤單
-```
-
-**缺少**:
-```go
-CancelAllOpenOrders(ctx, symbol) // 撤銷所有掛單
-```
-
-**影響**: 
-- 緊急情況需要逐個撤單
-- 效率較低
-
-**官方端點**: `DELETE /api/v3/openOrders`
-
----
-
-### 5. 🟡 缺少 User Data Stream
-
-**問題**: 沒有實現實時訂單更新推送
-
-**官方流程**:
-1. POST `/api/v3/userDataStream` 創建 Listen Key
-2. WebSocket 連接 `wss://stream.binance.com:9443/ws/<listenKey>`
-3. 接收訂單更新事件
-
-**事件類型**:
-- `executionReport` - 訂單狀態變化
-- `outboundAccountPosition` - 賬戶餘額變化
-- `balanceUpdate` - 餘額更新
-
-**影響**:
-- 只能通過輪詢查詢訂單狀態
-- 無法實時響應成交
-- 增加 API 調用次數
-
----
-
-## 🟡 期貨交易 API 問題 (`pkg/exchange/binancefut/`)
-
-### 6. 🟡 期貨止損訂單缺少參數
-
-**期貨特有參數** (缺少):
-- ❌ `workingType` - 觸發價格類型 (`MARK_PRICE` / `CONTRACT_PRICE`)
-- ❌ `priceProtect` - 價格保護 (TRUE/FALSE)
-- ❌ `priceMatch` - 價格匹配模式
-- ❌ `selfTradePreventionMode` - 自成交防止
-
-**官方參數說明**:
-- `workingType`: 默認為 `CONTRACT_PRICE`，可選 `MARK_PRICE`
-- `priceProtect`: 防止標記價格和合約價格差異過大時觸發
-
----
-
-### 7. 🟢 缺少批量下單
-
-**當前**: 單個下單
-**缺少**: 批量下單 (`POST /fapi/v1/batchOrders`)
-
-**優勢**:
-- 減少網絡延遲
-- 快速建立多個持倉
-- 降低 API 權重消耗
-
-**限制**: 最多 5 個訂單/請求
-
----
-
-### 8. 🟢 缺少條件單 (Conditional Orders)
-
-**期貨支持的高級訂單**:
-- ❌ `TRAILING_STOP_MARKET` - 跟蹤止損
-- ❌ 激活價格 (`activationPrice`)
-- ❌ 回調率 (`callbackRate`)
-
-**用途**: 
-- 自動跟隨價格移動止損位
-- 鎖定利潤
-
----
-
-## 🔴 關鍵安全問題
-
-### 9. 🔴 缺少訂單速率限制檢測
-
-**問題**: 
-- 沒有檢測 API 返回的 `X-MBX-USED-WEIGHT` header
-- 沒有本地限流機制
-
-**風險**:
-- 超過速率限制導致 IP 被封禁
-- 官方限制: 
-  - 現貨: 1200 weight / 分鐘
-  - 合約: 2400 weight / 分鐘
-
-**建議**: 
-```go
-// 在 doSigned 中檢查響應頭
-usedWeight := res.Header.Get("X-MBX-USED-WEIGHT-1M")
-if weight, _ := strconv.Atoi(usedWeight); weight > 1000 {
-    log.Warn("Approaching rate limit: ", weight)
-}
-```
-
----
-
-### 10. 🟡 缺少時間同步檢查
-
-**問題**: 
-- 每次請求都使用 `time.Now().UnixMilli()`
-- 如果本地時間與服務器偏移 > recvWindow，簽名失敗
-
-**建議**: 
-- 定期調用 `GetServerTime()` 計算偏移
-- 使用 `serverTime + offset` 而非本地時間
-
-**當前代碼風險** (line 73, 103, 212...):
-```go
-params.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-// 如果本地時間快/慢，可能導致 -1021 錯誤 (Timestamp outside recvWindow)
-```
-
----
-
-## 📊 完整性對比表
-
-| 功能 | 現貨 | U合約 | 幣合約 | 官方支持 |
-|------|------|-------|--------|---------|
-| **基礎訂單** |
-| MARKET | ✅ | ✅ | ✅ | ✅ |
-| LIMIT | ✅ | ✅ | ✅ | ✅ |
-| **止損止盈** |
-| STOP_LOSS | ❌ | ❌ | ❌ | ✅ |
-| STOP_LOSS_LIMIT | ❌ | ❌ | ❌ | ✅ |
-| TAKE_PROFIT | ❌ | ❌ | ❌ | ✅ |
-| TAKE_PROFIT_LIMIT | ❌ | ❌ | ❌ | ✅ |
-| **高級訂單** |
-| Iceberg | ❌ | ❌ | ❌ | ✅ |
-| TRAILING_STOP | ❌ | ❌ | ❌ | ✅ (期貨) |
-| **操作** |
-| 撤單 | ✅ | ✅ | ✅ | ✅ |
-| 批量撤單 | ❌ | ❌ | ❌ | ✅ |
-| 批量下單 | ❌ | ❌ | ❌ | ✅ (期貨) |
-| **查詢** |
-| 查詢訂單 | ✅ | ✅ | ✅ | ✅ |
-| 查詢持倉 | N/A | ✅ | ✅ | ✅ |
-| 查詢賬戶 | ✅ | ✅ | ✅ | ✅ |
-| **實時更新** |
-| User Data Stream | ❌ | ❌ | ❌ | ✅ |
-| **風控** |
-| 速率限制檢測 | ❌ | ❌ | ❌ | 建議 |
-| 時間同步 | ⚠️ | ⚠️ | ⚠️ | 建議 |
-
----
-
-## 🎯 優先級修復建議
-
-### 🔴 Priority 1 - 安全與穩定性
-
-1. **添加速率限制檢測**
-   - 解析 `X-MBX-USED-WEIGHT` header
-   - 接近限制時延遲請求
-
-2. **時間同步機制**
-   - 定期同步服務器時間
-   - 使用偏移量修正本地時間
-
-### 🟡 Priority 2 - 核心功能
-
-3. **添加止損/止盈訂單**
-   - 擴展 OrderType 枚舉
-   - 添加 StopPrice 字段
-   - 實現 STOP_LOSS_LIMIT 下單邏輯
-
-4. **User Data Stream**
-   - 創建/續期 Listen Key
-   - WebSocket 訂閱
-   - 解析訂單更新事件
-
-5. **批量撤單**
-   - 實現 `CancelAllOpenOrders()`
-
-### 🟢 Priority 3 - 高級功能
-
-6. **冰山訂單**
-   - 添加 IcebergQty 參數
-
-7. **批量下單** (期貨)
-   - 實現 `SubmitBatchOrders()`
-
-8. **跟蹤止損** (期貨)
-   - TRAILING_STOP_MARKET 類型
-   - 激活價格和回調率
-
----
-
-## 📝 程式碼修復示例
-
-### 擴展 OrderType
-
-```go
-// pkg/exchange/types.go
 const (
     OrderTypeMarket          OrderType = "MARKET"
     OrderTypeLimit           OrderType = "LIMIT"
-    OrderTypeStopLoss        OrderType = "STOP_LOSS"
-    OrderTypeStopLossLimit   OrderType = "STOP_LOSS_LIMIT"
-    OrderTypeTakeProfit      OrderType = "TAKE_PROFIT"
-    OrderTypeTakeProfitLimit OrderType = "TAKE_PROFIT_LIMIT"
-    OrderTypeLimitMaker      OrderType = "LIMIT_MAKER"
+    OrderTypeStopLoss        OrderType = "STOP_LOSS"         // ✅ NEW
+    OrderTypeStopLossLimit   OrderType = "STOP_LOSS_LIMIT"   // ✅ NEW
+    OrderTypeTakeProfit      OrderType = "TAKE_PROFIT"       // ✅ NEW
+    OrderTypeTakeProfitLimit OrderType = "TAKE_PROFIT_LIMIT" // ✅ NEW
+    OrderTypeLimitMaker      OrderType = "LIMIT_MAKER"       // ✅ NEW
+    OrderTypeTrailingStop    OrderType = "TRAILING_STOP_MARKET" // ✅ NEW
 )
 ```
 
-### 擴展 OrderRequest
+---
+
+### 2. ✅ OrderRequest 字段擴展 (原 🟡)
+
+**狀態**: 已完全實作
+
+**檔案**: `pkg/exchanges/common/types.go`
 
 ```go
 type OrderRequest struct {
@@ -351,56 +69,264 @@ type OrderRequest struct {
     Type         OrderType
     Qty          float64
     Price        float64
-    StopPrice    float64    // NEW: 止損/止盈觸發價
+    StopPrice    float64     // ✅ NEW: 止損/止盈觸發價格
     TimeInForce  TimeInForce
-    IcebergQty   float64    // NEW: 冰山訂單可見數量
+    IcebergQty   float64     // ✅ NEW: 冰山訂單可見數量
     ClientID     string
     ReduceOnly   bool
     PositionSide string
-    WorkingType  string     // NEW: MARK_PRICE / CONTRACT_PRICE
-    PriceProtect bool       // NEW: 價格保護
-}
-```
-
-### 下單邏輯修改
-
-```go
-// pkg/exchange/binance/binance.go SubmitOrder 方法
-if req.Type == exchange.OrderTypeLimit || 
-   req.Type == exchange.OrderTypeStopLossLimit ||
-   req.Type == exchange.OrderTypeTakeProfitLimit {
-    params.Set("price", formatFloat(req.Price))
-    params.Set("timeInForce", string(toBinanceTIF(req.TimeInForce)))
-}
-
-if req.Type == exchange.OrderTypeStopLoss ||
-   req.Type == exchange.OrderTypeStopLossLimit ||
-   req.Type == exchange.OrderTypeTakeProfit ||
-   req.Type == exchange.OrderTypeTakeProfitLimit {
-    params.Set("stopPrice", formatFloat(req.StopPrice))
-}
-
-if req.IcebergQty > 0 {
-    params.Set("icebergQty", formatFloat(req.IcebergQty))
+    Market       MarketType
+    Leverage     int
+    
+    // Futures-specific
+    WorkingType     string   // ✅ NEW: MARK_PRICE / CONTRACT_PRICE
+    PriceProtect    bool     // ✅ NEW: 價格保護
+    ActivationPrice float64  // ✅ NEW: 跟蹤止損激活價
+    CallbackRate    float64  // ✅ NEW: 跟蹤止損回調率
 }
 ```
 
 ---
 
-## 📊 總結
+### 3. ✅ User Data Stream (原 🟡)
 
-### 整體評價: **B+ (85分)**
+**狀態**: 完整實作 (現貨+期貨)
 
-**優點**:
-- ✅ 簽名算法完全正確
-- ✅ 基礎交易功能可用
-- ✅ 代碼結構清晰
+**實作檔案**:
+- `internal/order/user_stream_spot.go` - 現貨用戶數據流
+- `internal/order/user_stream_futures.go` - 期貨用戶數據流
+- `pkg/exchanges/binance/spot/user_data_stream.go` - Listen Key 管理
+- `pkg/exchanges/binance/futures_usdt/client.go` - 期貨 Listen Key
 
-**不足**:
-- ⚠️ 缺少高級訂單類型 (止損/止盈)
-- ⚠️ 缺少實時訂單更新 (User Data Stream)
-- ⚠️ 缺少安全機制 (速率限制、時間同步)
-- ⚠️ 功能覆蓋率約 60% (基礎訂單+查詢)
+**功能**:
+- ✅ 創建 Listen Key (`CreateListenKey`)
+- ✅ 保持 Listen Key 存活 (`KeepAliveListenKey`)
+- ✅ 關閉 Listen Key (`CloseListenKey`)
+- ✅ WebSocket 訂閱執行報告
+- ✅ 實時訂單狀態更新
+- ✅ 自動存入 DB 並發布事件
 
-**建議**:
-優先實現止損訂單和 User Data Stream，這是實戰必需的功能。冰山訂單和批量操作可延後。
+---
+
+### 4. ✅ 速率限制檢測 (原 🔴)
+
+**狀態**: 完整實作
+
+**檔案**: `pkg/exchanges/common/ratelimit.go`
+
+```go
+type RateLimiter struct {
+    mu         sync.RWMutex
+    usedWeight int
+    limit      int
+    resetTime  time.Time
+    interval   time.Duration
+}
+
+func (rl *RateLimiter) UpdateFromHeader(headerValue string)
+func (rl *RateLimiter) GetUsage() (used int, limit int, percentage float64)
+func (rl *RateLimiter) ShouldDelay() bool
+```
+
+**整合**:
+- ✅ 現貨 Client: 1200 weight/分鐘
+- ✅ U本位期貨 Client: 2400 weight/分鐘
+- ✅ 幣本位期貨 Client: 2400 weight/分鐘
+- ✅ 自動從 `X-MBX-USED-WEIGHT` header 更新
+
+---
+
+### 5. ✅ 時間同步機制 (原 🟡)
+
+**狀態**: 完整實作
+
+**檔案**: `pkg/exchanges/common/timesync.go`
+
+```go
+type TimeSync struct {
+    mu            sync.RWMutex
+    offset        int64
+    getServerTime func() (int64, error)
+    syncInterval  time.Duration
+}
+
+func (ts *TimeSync) Start(ctx context.Context)
+func (ts *TimeSync) Sync(ctx context.Context) error
+func (ts *TimeSync) Now() int64
+func (ts *TimeSync) Offset() int64
+```
+
+**整合**:
+- ✅ 現貨 Client 啟動時初始化
+- ✅ 期貨 Client 啟動時初始化
+- ✅ 每 30 分鐘自動同步
+- ✅ 簽名請求優先使用同步後的時間戳
+
+---
+
+### 6. ✅ 批量撤單 (原 🟢)
+
+**狀態**: 已實作
+
+**方法**:
+```go
+// pkg/exchanges/binance/spot/binance.go
+func (c *Client) CancelAllOpenOrders(ctx context.Context, symbol string) error
+
+// pkg/exchanges/binance/futures_usdt/client.go
+func (c *Client) CancelAllOpenOrders(ctx context.Context, symbol string) error
+
+// pkg/exchanges/binance/futures_coin/client.go  
+func (c *Client) CancelAllOpenOrders(ctx context.Context, symbol string) error
+```
+
+---
+
+### 7. ✅ 冰山訂單支持 (原 🟡)
+
+**狀態**: 已支持
+
+**OrderRequest 字段**: `IcebergQty float64`
+
+**下單邏輯**: 當 `IcebergQty > 0` 時自動添加 `icebergQty` 參數
+
+---
+
+### 8. ✅ 期貨止損訂單參數 (原 🟡)
+
+**狀態**: 已完全支持
+
+**新增參數**:
+- ✅ `workingType` - 觸發價格類型 (MARK_PRICE / CONTRACT_PRICE)
+- ✅ `priceProtect` - 價格保護
+- ✅ `activationPrice` - 跟蹤止損激活價
+- ✅ `callbackRate` - 跟蹤止損回調率
+
+---
+
+## 🟡 剩餘待改進項目
+
+### 1. 🟢 批量下單 (期貨)
+
+**當前**: 單個下單
+**缺少**: `SubmitBatchOrders()` 批量下單
+
+**官方端點**: `POST /fapi/v1/batchOrders`
+
+**影響**:
+- 多腿策略需多次調用
+- 增加延遲和 API 權重
+
+**優先級**: 低 (多數場景單筆下單足夠)
+
+---
+
+### 2. 🟢 OCO 訂單 (One-Cancels-the-Other)
+
+**說明**: 同時掛止損和止盈，成交一個自動撤另一個
+
+**官方端點**: 
+- 現貨: `POST /api/v3/order/oco`
+- 期貨: 需手動管理
+
+**優先級**: 低 (可用策略引擎模擬)
+
+---
+
+### 3. 🟢 WebSocket 健康檢查
+
+**當前**: 依賴讀取錯誤觸發重連
+**建議**: 主動發送 ping/pong 檢測連線狀態
+
+**優先級**: 低 (已有重連機制)
+
+---
+
+## 📊 完整性對比表 (更新)
+
+| 功能 | 現貨 | U合約 | 幣合約 | 官方支持 | 狀態 |
+|------|------|-------|--------|---------|------|
+| **基礎訂單** |
+| MARKET | ✅ | ✅ | ✅ | ✅ | 完成 |
+| LIMIT | ✅ | ✅ | ✅ | ✅ | 完成 |
+| **止損止盈** |
+| STOP_LOSS | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| STOP_LOSS_LIMIT | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| TAKE_PROFIT | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| TAKE_PROFIT_LIMIT | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| **高級訂單** |
+| Iceberg | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| TRAILING_STOP | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| LIMIT_MAKER | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| OCO | ❌ | N/A | N/A | ✅ | 待定 |
+| **操作** |
+| 撤單 | ✅ | ✅ | ✅ | ✅ | 完成 |
+| 批量撤單 | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| 批量下單 | ❌ | ❌ | ❌ | ✅ | 待定 |
+| **查詢** |
+| 查詢訂單 | ✅ | ✅ | ✅ | ✅ | 完成 |
+| 查詢持倉 | N/A | ✅ | ✅ | ✅ | 完成 |
+| 查詢賬戶 | ✅ | ✅ | ✅ | ✅ | 完成 |
+| **實時更新** |
+| User Data Stream | ✅ | ✅ | ✅ | ✅ | ✅ NEW |
+| **風控** |
+| 速率限制檢測 | ✅ | ✅ | ✅ | 建議 | ✅ NEW |
+| 時間同步 | ✅ | ✅ | ✅ | 建議 | ✅ NEW |
+| **期貨專屬** |
+| 設置槓桿 | N/A | ✅ | ✅ | ✅ | 完成 |
+| 設置保證金類型 | N/A | ✅ | ✅ | ✅ | 完成 |
+| 對沖模式 | N/A | ✅ | ✅ | ✅ | 完成 |
+
+---
+
+## 📈 改進歷程
+
+| 日期 | 評分 | 主要變更 |
+|------|------|----------|
+| 2025-11-27 | B+ (85分) | 初始審計，識別多項缺失 |
+| 2025-12-08 | **A (95分)** | 全面完善：止損/止盈、User Data Stream、速率限制、時間同步 |
+
+---
+
+## 🎯 後續建議
+
+### 優先級 1 (可選)
+1. **批量下單**: 為需要快速建倉的策略實作
+
+### 優先級 2 (低)
+2. **OCO 訂單**: 考慮是否需要原生支持
+3. **WebSocket ping/pong**: 增強連線健康監控
+
+---
+
+## 附錄: 架構圖
+
+```
+                      ┌─────────────────────────────────────┐
+                      │            Exchange APIs            │
+                      │  (Spot / USDT Futures / Coin Fut)   │
+                      └────────────────┬────────────────────┘
+                                       │
+           ┌───────────────────────────┼───────────────────────────┐
+           │                           │                           │
+    ┌──────▼──────┐             ┌──────▼──────┐             ┌──────▼──────┐
+    │  Spot Client │             │ USDT Fut    │             │ Coin Fut    │
+    │              │             │   Client    │             │   Client    │
+    │ • RateLimiter│             │ • RateLimiter│             │ • RateLimiter│
+    │ • TimeSync   │             │ • TimeSync   │             │ • TimeSync   │
+    │ • ListenKey  │             │ • ListenKey  │             │ • ListenKey  │
+    └──────┬───────┘             └──────┬───────┘             └──────┬───────┘
+           │                           │                           │
+           └───────────────────────────┼───────────────────────────┘
+                                       │
+                      ┌────────────────▼────────────────┐
+                      │        User Data Stream         │
+                      │  • SpotUserStream               │
+                      │  • FuturesUserStream            │
+                      │  • Real-time fills → DB + Bus   │
+                      └─────────────────────────────────┘
+```
+
+---
+
+*本報告基於程式碼審查完成。建議定期更新以反映 API 變更。*

@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -42,10 +43,11 @@ func NewExecutor(database *db.Database, bus *events.Bus, gw exchange.Gateway, ve
 	}
 }
 
-func (e *Executor) Handle(ctx context.Context, o Order) {
+func (e *Executor) Handle(ctx context.Context, o Order) error {
 	if e.DB == nil {
-		log.Println("executor: DB not configured")
-		return
+		err := fmt.Errorf("executor: DB not configured")
+		log.Println(err)
+		return err
 	}
 
 	// Build exchange request with all advanced parameters
@@ -78,6 +80,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) {
 	var exchID string
 	status := "NEW"
 	filled := false
+	var execErr error
 
 	if e.SkipExchange {
 		log.Printf("executor: SkipExchange enabled, not sending order %s to external gateway", o.ID)
@@ -88,6 +91,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) {
 			if err != nil {
 				log.Printf("executor: submit to %s failed: %v", venue, err)
 				status = "REJECTED"
+				execErr = err
 				if e.Bus != nil {
 					e.Bus.Publish(events.EventOrderRejected, err.Error())
 				}
@@ -105,6 +109,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) {
 		} else {
 			log.Printf("executor: no gateway resolved for order %s, marking as REJECTED (no external send)", o.ID)
 			status = "REJECTED"
+			execErr = fmt.Errorf("no gateway resolved")
 			if e.Bus != nil {
 				e.Bus.Publish(events.EventOrderRejected, "no gateway for order")
 			}
@@ -123,7 +128,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) {
 	}
 	if err := e.DB.CreateOrder(ctx, model); err != nil {
 		log.Printf("executor: store order error: %v", err)
-		return
+		return err
 	}
 
 	// If filled, store a trade row (price may be 0 for market; will be reconciled later)
@@ -155,6 +160,8 @@ func (e *Executor) Handle(ctx context.Context, o Order) {
 	if e.Bus != nil {
 		e.Bus.Publish(events.EventOrderUpdate, model)
 	}
+
+	return execErr
 }
 
 // gatewayForOrder picks an exchange gateway for the given order based on its strategy binding.

@@ -6,6 +6,8 @@ import (
 
 	"trading-core/internal/balance"
 	"trading-core/internal/events"
+	"trading-core/internal/monitor"
+	"trading-core/internal/order"
 	"trading-core/internal/risk"
 	"trading-core/internal/strategy"
 	"trading-core/pkg/db"
@@ -21,6 +23,8 @@ type Server struct {
 	RiskMgr    *risk.Manager
 	BalanceMgr *balance.Manager
 	StratEng   *strategy.Engine
+	Metrics    *monitor.SystemMetrics
+	OrderQueue *order.Queue
 	JWTSecret  string
 	Meta       SystemMeta
 }
@@ -34,7 +38,7 @@ type SystemMeta struct {
 	Version     string
 }
 
-func NewServer(bus *events.Bus, database *db.Database, riskMgr *risk.Manager, balanceMgr *balance.Manager, stratEng *strategy.Engine, meta SystemMeta, jwtSecret string) *Server {
+func NewServer(bus *events.Bus, database *db.Database, riskMgr *risk.Manager, balanceMgr *balance.Manager, stratEng *strategy.Engine, metrics *monitor.SystemMetrics, orderQueue *order.Queue, meta SystemMeta, jwtSecret string) *Server {
 	r := gin.New()
 
 	// Middleware stack (order matters!)
@@ -53,6 +57,8 @@ func NewServer(bus *events.Bus, database *db.Database, riskMgr *risk.Manager, ba
 		RiskMgr:    riskMgr,
 		BalanceMgr: balanceMgr,
 		StratEng:   stratEng,
+		Metrics:    metrics,
+		OrderQueue: orderQueue,
 		JWTSecret:  jwtSecret,
 		Meta:       meta,
 	}
@@ -67,6 +73,8 @@ func (s *Server) routes() {
 	api := s.Router.Group("/api")
 	{
 		api.GET("/system/status", s.getSystemStatus)
+		api.GET("/metrics", s.getMetrics)
+		api.GET("/queue/metrics", s.getQueueMetrics)
 
 		// Auth endpoints (no auth required)
 		auth := api.Group("/auth")

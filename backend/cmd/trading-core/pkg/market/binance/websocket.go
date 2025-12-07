@@ -15,8 +15,29 @@ import (
 
 // StreamClient manages lightweight streaming from Binance public websockets.
 type StreamClient struct {
-	StreamURL string
-	dialer    *websocket.Dialer
+	StreamURL       string
+	dialer          *websocket.Dialer
+	ReconnectConfig *ReconnectConfig
+}
+
+// ReconnectConfig defines the reconnection behavior.
+type ReconnectConfig struct {
+	Enabled      bool          // Whether auto-reconnect is enabled
+	MaxRetries   int           // Maximum number of reconnection attempts (0 = unlimited)
+	InitialDelay time.Duration // Initial delay before first reconnect attempt
+	MaxDelay     time.Duration // Maximum delay between reconnect attempts
+	Multiplier   float64       // Delay multiplier for exponential backoff
+}
+
+// DefaultReconnectConfig returns sensible defaults for reconnection.
+func DefaultReconnectConfig() *ReconnectConfig {
+	return &ReconnectConfig{
+		Enabled:      true,
+		MaxRetries:   10,
+		InitialDelay: 1 * time.Second,
+		MaxDelay:     30 * time.Second,
+		Multiplier:   2.0,
+	}
 }
 
 // NewStreamClient builds a websocket client; testnet toggles the host.
@@ -26,13 +47,38 @@ func NewStreamClient(testnet bool) *StreamClient {
 		host = "testnet.binance.vision"
 	}
 	return &StreamClient{
-		StreamURL: (&url.URL{Scheme: "wss", Host: host, Path: "/ws"}).String(),
-		dialer:    websocket.DefaultDialer,
+		StreamURL:       (&url.URL{Scheme: "wss", Host: host, Path: "/ws"}).String(),
+		dialer:          websocket.DefaultDialer,
+		ReconnectConfig: DefaultReconnectConfig(),
 	}
 }
 
+// NewStreamClientWithConfig builds a websocket client with custom reconnect config.
+func NewStreamClientWithConfig(testnet bool, reconnectCfg *ReconnectConfig) *StreamClient {
+	c := NewStreamClient(testnet)
+	if reconnectCfg != nil {
+		c.ReconnectConfig = reconnectCfg
+	}
+	return c
+}
+
+// calculateBackoff returns the delay for the given retry attempt using exponential backoff.
+func (c *StreamClient) calculateBackoff(attempt int) time.Duration {
+	if c.ReconnectConfig == nil {
+		return time.Second
+	}
+	delay := float64(c.ReconnectConfig.InitialDelay)
+	for i := 0; i < attempt; i++ {
+		delay *= c.ReconnectConfig.Multiplier
+	}
+	if time.Duration(delay) > c.ReconnectConfig.MaxDelay {
+		return c.ReconnectConfig.MaxDelay
+	}
+	return time.Duration(delay)
+}
+
 // SubscribeKlines listens to kline stream and pushes parsed klines into a channel.
-// It returns the channel and a stop function.
+// It returns the channel and a stop function. Auto-reconnection is enabled by default.
 func (c *StreamClient) SubscribeKlines(ctx context.Context, symbol, interval string) (<-chan Kline, func(), error) {
 	// Binance requires lowercase symbols for WebSocket streams
 	stream := fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), interval)
@@ -44,14 +90,65 @@ func (c *StreamClient) SubscribeKlines(ctx context.Context, symbol, interval str
 	}
 
 	out := make(chan Kline, 100)
-	var once sync.Once
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	var mu sync.Mutex
+	currentConn := conn
+
 	stop := func() {
-		once.Do(func() {
-			// Ignore errors; connection may already be closed.
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			_ = conn.Close()
+		stopOnce.Do(func() {
+			close(stopCh)
+			mu.Lock()
+			if currentConn != nil {
+				_ = currentConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+				_ = currentConn.Close()
+			}
+			mu.Unlock()
 			close(out)
 		})
+	}
+
+	// reconnect attempts to establish a new connection with exponential backoff.
+	reconnect := func() (*websocket.Conn, error) {
+		if c.ReconnectConfig == nil || !c.ReconnectConfig.Enabled {
+			return nil, fmt.Errorf("reconnect disabled")
+		}
+
+		maxRetries := c.ReconnectConfig.MaxRetries
+		if maxRetries == 0 {
+			maxRetries = 100 // Effectively unlimited but bounded
+		}
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-stopCh:
+				return nil, fmt.Errorf("stopped")
+			default:
+			}
+
+			delay := c.calculateBackoff(attempt)
+			log.Printf("🔄 [%s] WebSocket reconnecting in %v (attempt %d/%d)", symbol, delay, attempt+1, maxRetries)
+
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-stopCh:
+				return nil, fmt.Errorf("stopped")
+			}
+
+			newConn, _, err := c.dialer.DialContext(ctx, u, nil)
+			if err != nil {
+				log.Printf("❌ [%s] Reconnect failed: %v", symbol, err)
+				continue
+			}
+
+			log.Printf("✅ [%s] WebSocket reconnected successfully", symbol)
+			return newConn, nil
+		}
+		return nil, fmt.Errorf("max retries (%d) exceeded", maxRetries)
 	}
 
 	go func() {
@@ -60,17 +157,55 @@ func (c *StreamClient) SubscribeKlines(ctx context.Context, symbol, interval str
 			select {
 			case <-ctx.Done():
 				return
+			case <-stopCh:
+				return
 			default:
 			}
 
-			_, msg, err := conn.ReadMessage()
+			mu.Lock()
+			activeConn := currentConn
+			mu.Unlock()
+
+			if activeConn == nil {
+				return
+			}
+
+			_, msg, err := activeConn.ReadMessage()
 			if err != nil {
-				// If connection already closed by caller/context, just exit quietly.
+				// Check if explicitly stopped
+				select {
+				case <-stopCh:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// If connection closed normally, exit quietly
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
 					strings.Contains(err.Error(), "use of closed network connection") {
 					return
 				}
-				log.Printf("binance ws read error: %v", err)
+
+				log.Printf("⚠️ [%s] WebSocket read error: %v", symbol, err)
+
+				// Attempt reconnection
+				if c.ReconnectConfig != nil && c.ReconnectConfig.Enabled {
+					mu.Lock()
+					_ = currentConn.Close()
+					mu.Unlock()
+
+					newConn, reconErr := reconnect()
+					if reconErr != nil {
+						log.Printf("❌ [%s] Failed to reconnect: %v", symbol, reconErr)
+						return
+					}
+
+					mu.Lock()
+					currentConn = newConn
+					mu.Unlock()
+					continue
+				}
 				return
 			}
 
@@ -79,7 +214,12 @@ func (c *StreamClient) SubscribeKlines(ctx context.Context, symbol, interval str
 				log.Printf("binance ws parse error: %v", err)
 				continue
 			}
-			out <- parsed
+
+			select {
+			case out <- parsed:
+			default:
+				// Channel full, drop oldest to avoid blocking
+			}
 		}
 	}()
 
