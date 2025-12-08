@@ -1,0 +1,89 @@
+{
+    "common": {
+        "loading": "載入中...",
+        "error": "發生錯誤",
+        "save": "儲存",
+        "cancel": "取消",
+        "confirm": "確認",
+        "delete": "刪除",
+        "edit": "編輯",
+        "create": "新增",
+        "search": "搜尋",
+        "filter": "篩選",
+        "export": "匯出",
+        "refresh": "重新整理"
+    },
+    "nav": {
+        "dashboard": "儀表板",
+        "strategies": "策略管理",
+        "orders": "訂單歷史",
+        "performance": "績效報告",
+        "settings": "設置"
+    },
+    "auth": {
+        "login": "登入",
+        "register": "註冊",
+        "logout": "登出",
+        "email": "電子郵件",
+        "password": "密碼",
+        "confirmPassword": "確認密碼",
+        "loginTitle": "歡迎回來",
+        "registerTitle": "建立帳戶",
+        "loginSubtitle": "請輸入您的帳號密碼以繼續",
+        "registerSubtitle": "註冊以開始您的量化交易之旅"
+    },
+    "dashboard": {
+        "title": "儀表板",
+        "totalBalance": "總資產",
+        "availableBalance": "可用餘額",
+        "margin": "保證金",
+        "unrealizedPnl": "未實現損益",
+        "activeStrategies": "運行中策略",
+        "recentOrders": "最近訂單"
+    },
+    "strategy": {
+        "title": "策略管理",
+        "name": "名稱",
+        "type": "類型",
+        "symbol": "交易對",
+        "status": "狀態",
+        "connection": "連線",
+        "actions": "操作",
+        "start": "啟動",
+        "pause": "暫停",
+        "stop": "停止",
+        "panicSell": "平倉",
+        "details": "詳情",
+        "statusActive": "運行中",
+        "statusPaused": "已暫停",
+        "statusStopped": "已停止",
+        "statusError": "錯誤"
+    },
+    "order": {
+        "title": "訂單歷史",
+        "time": "時間",
+        "side": "方向",
+        "price": "價格",
+        "quantity": "數量",
+        "filled": "成交",
+        "buy": "買入",
+        "sell": "賣出"
+    },
+    "performance": {
+        "title": "績效報告",
+        "realizedPnl": "實現損益",
+        "totalTrades": "總交易次數",
+        "winRate": "勝率",
+        "maxDrawdown": "最大回撤",
+        "sharpeRatio": "夏普比率"
+    },
+    "settings": {
+        "title": "設置",
+        "connections": "連線管理",
+        "riskManagement": "風控設置",
+        "notifications": "通知設置",
+        "appearance": "外觀",
+        "darkMode": "深色模式",
+        "language": "語言"
+    }
+}
