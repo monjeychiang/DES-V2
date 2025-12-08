@@ -16,6 +16,7 @@ import (
 
 	"trading-core/internal/api"
 	"trading-core/internal/balance"
+	"trading-core/internal/engine"
 	"trading-core/internal/events"
 	"trading-core/internal/indicators"
 	"trading-core/internal/market"
@@ -593,13 +594,35 @@ func main() {
 		coinStream.Start(ctx)
 	}
 
+	// Create Engine Service (Phase 1 Architecture)
+	engService := engine.NewImpl(engine.Config{
+		StratEngine: stratEngine,
+		RiskMgr:     riskMgr,
+		BalanceMgr:  balanceMgr,
+		OrderQueue:  orderQueue,
+		Bus:         bus,
+		DB:          database,
+		Meta: engine.SystemStatus{
+			Mode: func() string {
+				if cfg.DryRun {
+					return "DRY_RUN"
+				}
+				return "LIVE"
+			}(),
+			DryRun:      cfg.DryRun,
+			Venue:       venue,
+			Symbols:     cfg.BinanceSymbols,
+			UseMockFeed: cfg.UseMockFeed,
+			Version:     buildVersion,
+		},
+	})
+	log.Println("✓ Engine service initialized")
+
 	// API
 	server := api.NewServer(
 		bus,
 		database,
-		riskMgr,
-		balanceMgr,
-		stratEngine,
+		engService,
 		sysMetrics,
 		orderQueue,
 		api.SystemMeta{

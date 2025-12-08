@@ -4,12 +4,10 @@ import (
 	"net/http"
 	"time"
 
-	"trading-core/internal/balance"
+	"trading-core/internal/engine"
 	"trading-core/internal/events"
 	"trading-core/internal/monitor"
 	"trading-core/internal/order"
-	"trading-core/internal/risk"
-	"trading-core/internal/strategy"
 	"trading-core/pkg/db"
 
 	"github.com/gin-gonic/gin"
@@ -17,16 +15,19 @@ import (
 
 // Server wires HTTP endpoints around the event bus.
 type Server struct {
-	Router     *gin.Engine
-	Bus        *events.Bus
-	DB         *db.Database
-	RiskMgr    *risk.Manager
-	BalanceMgr *balance.Manager
-	StratEng   *strategy.Engine
+	Router *gin.Engine
+	Bus    *events.Bus
+	DB     *db.Database
+
+	// Engine service interface (Phase 1 architecture)
+	Engine engine.Service
+
+	// Monitoring (kept as they provide direct metrics access)
 	Metrics    *monitor.SystemMetrics
 	OrderQueue *order.Queue
-	JWTSecret  string
-	Meta       SystemMeta
+
+	JWTSecret string
+	Meta      SystemMeta
 }
 
 // SystemMeta describes runtime status exposed to the UI.
@@ -38,7 +39,16 @@ type SystemMeta struct {
 	Version     string
 }
 
-func NewServer(bus *events.Bus, database *db.Database, riskMgr *risk.Manager, balanceMgr *balance.Manager, stratEng *strategy.Engine, metrics *monitor.SystemMetrics, orderQueue *order.Queue, meta SystemMeta, jwtSecret string) *Server {
+// NewServer creates API server with Engine service interface.
+func NewServer(
+	bus *events.Bus,
+	database *db.Database,
+	eng engine.Service,
+	metrics *monitor.SystemMetrics,
+	orderQueue *order.Queue,
+	meta SystemMeta,
+	jwtSecret string,
+) *Server {
 	r := gin.New()
 
 	// Middleware stack (order matters!)
@@ -54,9 +64,7 @@ func NewServer(bus *events.Bus, database *db.Database, riskMgr *risk.Manager, ba
 		Router:     r,
 		Bus:        bus,
 		DB:         database,
-		RiskMgr:    riskMgr,
-		BalanceMgr: balanceMgr,
-		StratEng:   stratEng,
+		Engine:     eng,
 		Metrics:    metrics,
 		OrderQueue: orderQueue,
 		JWTSecret:  jwtSecret,

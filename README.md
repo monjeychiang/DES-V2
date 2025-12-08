@@ -9,7 +9,7 @@
 
 ## 📋 專案簡介
 
-DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量化交易系統,採用 Go + Python 混合架構,提供:
+DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量化交易系統，採用 Go + Python 混合架構，提供:
 
 - **高性能交易引擎** - Go 語言實現的低延遲訂單執行
 - **靈活策略框架** - Python 策略開發與回測環境
@@ -28,7 +28,8 @@ DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量�
 ┌─────────────────────────────────────────────────────────┐
 │                  Backend (Go Core)                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Trading Core │  │ Risk Manager │  │ Market Data  │  │
+│  │ Engine       │  │ Risk Manager │  │ Market Data  │  │
+│  │   Service    │  │              │  │              │  │
 │  └──────────────┘  └──────────────┘  └──────────────┘  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │ Order Engine │  │ Position Mgr │  │ Event Bus    │  │
@@ -69,11 +70,8 @@ DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量�
 
 2. **配置環境變數**
    ```bash
-   # 複製範例配置檔
    cp .env.example .env
-   
    # 編輯 .env 並填入你的 API 金鑰
-   # 詳見 docs/setup/ENV_VARIABLES_GUIDE.md
    ```
 
 3. **啟動後端服務**
@@ -96,60 +94,87 @@ DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量�
 ## 📚 文件導覽
 
 ### 核心文件
-- [系統架構](docs/architecture/SYSTEM_ARCHITECTURE.md) - 完整的系統架構說明
-- [開發者入門](docs/process/DEVELOPER_ONBOARDING.md) - 新手開發指南
-- [快速參考](docs/setup/QUICK_REFERENCE.md) - 常用指令與 API 參考
+| 文件 | 說明 |
+|------|------|
+| [系統架構](docs/architecture/SYSTEM_ARCHITECTURE.md) | 完整的系統架構說明 |
+| [開發者入門](docs/process/DEVELOPER_ONBOARDING.md) | 新手開發指南 |
+| [快速參考](docs/setup/QUICK_REFERENCE.md) | 常用指令與 API 參考 |
 
-### 詳細文件 (docs/)
-- [API 文件](docs/api/API.md) - REST API 規格
-- [環境變數指南](docs/setup/ENV_VARIABLES_GUIDE.md) - 配置說明
-- [專案狀態](docs/roadmap/PROJECT_STATUS.md) - 當前開發進度
-- [開發路線圖](docs/roadmap/DEVELOPMENT_ROADMAP_DES_V2.md) - 未來規劃
+### API 與配置
+| 文件 | 說明 |
+|------|------|
+| [API 文件](docs/api/API.md) | REST API 規格 |
+| [Trading API 審計](docs/api/TRADING_API_AUDIT.md) | API 完整性評估 (A 級) |
+| [環境變數指南](docs/setup/ENV_VARIABLES_GUIDE.md) | 配置說明 |
+
+### 架構與規劃
+| 文件 | 說明 |
+|------|------|
+| [服務架構路線圖 V2](docs/architecture/SERVICE_ARCHITECTURE_ROADMAP_V2.md) | 架構演進規劃 |
+| [性能分析](docs/architecture/PERFORMANCE_ANALYSIS.md) | 性能瓶頸與優化 |
+| [交易所串接指南](docs/development/EXCHANGE_INTEGRATION_GUIDE.md) | 新交易所開發規範 |
 
 ## 🔧 專案結構
 
 ```
 DES-V2/
-├── backend/              # Go 後端核心
-│   └── cmd/
-│       └── trading-core/ # 主要交易引擎
-├── frontend/             # React 前端
-├── python/               # Python 策略層
-│   ├── strategies/       # 交易策略
-│   ├── worker/           # 策略執行器
-│   └── alert/            # 告警系統
-├── proto/                # gRPC 協議定義
-├── scripts/              # 工具腳本
-├── docs/                 # 詳細文件
-└── license-server/       # 授權服務 (規劃中)
+├── backend/                      # Go 後端核心
+│   └── cmd/trading-core/
+│       ├── main.go               # 應用程式入口
+│       ├── internal/
+│       │   ├── engine/           # Engine 服務層 (NEW)
+│       │   ├── api/              # REST API
+│       │   ├── strategy/         # 策略引擎
+│       │   ├── order/            # 訂單執行
+│       │   ├── risk/             # 風險管理
+│       │   └── events/           # 事件匯流排
+│       └── pkg/
+│           ├── db/               # 資料庫
+│           └── exchanges/        # 交易所 Gateway
+├── frontend/                     # React 前端
+├── python/                       # Python 策略層
+├── proto/                        # gRPC 協議定義
+├── docs/                         # 詳細文件
+└── scripts/                      # 工具腳本
 ```
 
 ## 🎯 核心功能
 
 ### ✅ 已實現
-- ✓ Binance Spot/Futures 市場數據訂閱
-- ✓ 實時訂單執行與管理
-- ✓ 多層次風險控制系統
-- ✓ 倉位追蹤與對帳
-- ✓ SQLite 數據持久化
-- ✓ RESTful API 介面
-- ✓ React 管理後台
-- ✓ Python 策略框架
+| 功能 | 狀態 | 說明 |
+|------|------|------|
+| Binance 市場數據 | ✅ | Spot + USDT Futures + Coin Futures |
+| 訂單執行 | ✅ | 同步/異步執行，含 Worker Pool |
+| 風險控制 | ✅ | 多層次風險檢查，止損/止盈 |
+| 倉位追蹤 | ✅ | 實時對帳，支援 User Data Stream |
+| Engine 服務層 | ✅ | 介面隔離架構 (Phase 1 完成) |
+| REST API | ✅ | 完整 CRUD + Auth |
+| React 管理後台 | ✅ | 實時儀表板 |
 
-### 🚧 開發中
-- ⏳ WebSocket 實時推送
-- ⏳ 高級策略回測引擎
-- ⏳ 多交易所支援
-- ⏳ 雲端部署方案
+### 🚧 規劃中
+| 功能 | 狀態 | 說明 |
+|------|------|------|
+| WebSocket 推送 | 🔄 | 部分實現 |
+| 高級回測引擎 | 📋 | 規劃中 |
+| 多交易所支援 | 📋 | [開發指南](docs/development/EXCHANGE_INTEGRATION_GUIDE.md) |
+| 服務拆分 (Phase 2) | 📋 | [架構路線圖](docs/architecture/SERVICE_ARCHITECTURE_ROADMAP_V2.md) |
 
 ## 🛡️ 風險管理
 
 系統內建多層風險控制:
 - **訂單級別**: 價格偏差檢查、數量限制
 - **帳戶級別**: 總倉位限制、保證金監控
-- **系統級別**: 緊急熔斷機制、異常檢測
+- **系統級別**: 緊急熔斷機制、Panic Recovery
 
-詳見 [風險管理文件](docs/design/ADVANCED_FEATURES_DESIGN.md)
+## 📊 性能改進
+
+V2 版本包含多項性能優化：
+- **Worker Pool** - 限制並發 Goroutine
+- **Async Executor** - 非阻塞訂單執行
+- **Lazy Stats** - O(1) 統計查詢
+- **Batched Drain** - 減少鎖競爭
+
+詳見 [性能改進計畫 V2](docs/roadmap/PERFORMANCE_IMPROVEMENT_PLAN_V2.md)
 
 ## 🤝 貢獻指南
 
@@ -180,4 +205,4 @@ DES-V2/
 
 ---
 
-**⚠️ 風險提示**: 本系統僅供學習和研究使用。加密貨幣交易存在高風險,請謹慎使用並自負盈虧。
+**⚠️ 風險提示**: 本系統僅供學習和研究使用。加密貨幣交易存在高風險，請謹慎使用並自負盈虧。

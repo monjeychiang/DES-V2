@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"trading-core/internal/events"
-	"trading-core/internal/strategy"
 	"trading-core/pkg/db"
 
 	"github.com/gin-gonic/gin"
@@ -127,11 +125,11 @@ func (s *Server) getPositions(c *gin.Context) {
 
 // getBalance returns current balance information.
 func (s *Server) getBalance(c *gin.Context) {
-	if s.BalanceMgr == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "balance manager not available"})
+	bal, err := s.Engine.GetBalance(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	}
-	bal := s.BalanceMgr.GetBalance()
 	c.JSON(http.StatusOK, bal)
 }
 
@@ -154,39 +152,12 @@ func (s *Server) getSystemStatus(c *gin.Context) {
 
 // getRiskMetrics returns current risk metrics.
 func (s *Server) getRiskMetrics(c *gin.Context) {
-	if s.RiskMgr == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "risk manager not available"})
-		return
-	}
-	// Assuming RiskManager has a method to get metrics or we query DB
-	// For now, let's query the risk_metrics table for today
-	today := time.Now().Format("2006-01-02")
-	var pnl, losses float64
-	var trades, wins int
-
-	err := s.DB.DB.QueryRow(`
-		SELECT daily_pnl, daily_trades, daily_wins, daily_losses 
-		FROM risk_metrics WHERE date = ?`, today).Scan(&pnl, &trades, &wins, &losses)
-
+	metrics, err := s.Engine.GetRiskMetrics(c.Request.Context())
 	if err != nil {
-		// Return zeros if no row found
-		c.JSON(http.StatusOK, gin.H{
-			"date":         today,
-			"daily_pnl":    0,
-			"daily_trades": 0,
-			"daily_wins":   0,
-			"daily_losses": 0,
-		})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"date":         today,
-		"daily_pnl":    pnl,
-		"daily_trades": trades,
-		"daily_wins":   wins,
-		"daily_losses": losses,
-	})
+	c.JSON(http.StatusOK, metrics)
 }
 
 // getStrategyPerformance returns daily pnl and equity curve (cash-flow based) for a strategy.
@@ -449,7 +420,7 @@ func (s *Server) startStrategy(c *gin.Context) {
 	if !s.canAccessStrategy(c, id) {
 		return
 	}
-	if err := s.StratEng.ResumeStrategy(id); err != nil {
+	if err := s.Engine.StartStrategy(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -461,7 +432,7 @@ func (s *Server) pauseStrategy(c *gin.Context) {
 	if !s.canAccessStrategy(c, id) {
 		return
 	}
-	if err := s.StratEng.PauseStrategy(id); err != nil {
+	if err := s.Engine.PauseStrategy(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -473,7 +444,7 @@ func (s *Server) stopStrategy(c *gin.Context) {
 	if !s.canAccessStrategy(c, id) {
 		return
 	}
-	if err := s.StratEng.StopStrategy(id); err != nil {
+	if err := s.Engine.StopStrategy(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -486,56 +457,13 @@ func (s *Server) panicSellStrategy(c *gin.Context) {
 		return
 	}
 
-	// 1. Get Position
-	qty, err := s.StratEng.GetStrategyPosition(id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get position: " + err.Error()})
+	userID := CurrentUserID(c)
+	if err := s.Engine.PanicSellStrategy(c.Request.Context(), id, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	if qty == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no position to close"})
-		return
-	}
-
-	// 2. Determine Action
-	action := "SELL"
-	if qty < 0 {
-		action = "BUY"
-	}
-	size := qty
-	if size < 0 {
-		size = -size
-	}
-
-	// 3. Emit Signal (Note: Panic Sell)
-	// We need to know the symbol. Query DB or Engine?
-	// Engine's GetStrategyPosition doesn't return symbol.
-	// Let's query DB quickly or update GetStrategyPosition.
-	// For speed, let's just query DB here.
-	var symbol string
-	err = s.DB.DB.QueryRow("SELECT symbol FROM strategy_instances WHERE id = ?", id).Scan(&symbol)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get symbol: " + err.Error()})
-		return
-	}
-
-	signal := strategy.Signal{
-		StrategyID: id,
-		Symbol:     symbol,
-		Action:     action,
-		Size:       size,
-		Note:       "Panic Sell",
-	}
-
-	s.Bus.Publish(events.EventStrategySignal, signal)
-
-	// 4. Stop Strategy
-	if err := s.StratEng.StopStrategy(id); err != nil {
-		// Log error but don't fail request since signal is sent
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "panic_sell_triggered", "close_qty": size})
+	c.JSON(http.StatusOK, gin.H{"status": "panic_sell_triggered"})
 }
 
 func (s *Server) updateStrategyParams(c *gin.Context) {
@@ -549,13 +477,7 @@ func (s *Server) updateStrategyParams(c *gin.Context) {
 		return
 	}
 
-	jsonBytes, err := json.Marshal(params)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	if err := s.StratEng.UpdateParams(id, jsonBytes); err != nil {
+	if err := s.Engine.UpdateStrategyParams(c.Request.Context(), id, params); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
