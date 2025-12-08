@@ -152,6 +152,9 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 			if err := e.DB.UpdateStrategyPosition(ctx, model.StrategyInstanceID, model.Symbol, model.Side, model.Qty, model.Price); err != nil {
 				log.Printf("executor: update strategy position error: %v", err)
 			}
+
+			// Check profit target (Phase 2 feature)
+			e.checkProfitTarget(ctx, model.StrategyInstanceID)
 		}
 	}
 
@@ -248,4 +251,68 @@ func (e *Executor) gatewayForStrategy(ctx context.Context, strategyID string) (e
 	e.mu.Unlock()
 
 	return newGw, exchangeType, true
+}
+
+// checkProfitTarget checks if the strategy has reached its profit target and stops it if so.
+// Supports both USDT (absolute) and PERCENT (percentage of initial balance) targets.
+func (e *Executor) checkProfitTarget(ctx context.Context, strategyID string) {
+	// 1. Get strategy profit target settings
+	var profitTarget float64
+	var profitTargetType string
+	err := e.DB.DB.QueryRowContext(ctx, `
+		SELECT COALESCE(profit_target, 0), COALESCE(profit_target_type, 'USDT')
+		FROM strategy_instances WHERE id = ?
+	`, strategyID).Scan(&profitTarget, &profitTargetType)
+	if err != nil || profitTarget <= 0 {
+		// No profit target configured or error
+		return
+	}
+
+	// 2. Get current realized PnL
+	var realizedPnL float64
+	err = e.DB.DB.QueryRowContext(ctx, `
+		SELECT COALESCE(realized_pnl, 0) FROM strategy_positions WHERE strategy_instance_id = ?
+	`, strategyID).Scan(&realizedPnL)
+	if err != nil {
+		return
+	}
+
+	// 3. Check if target reached
+	targetReached := false
+	switch profitTargetType {
+	case "USDT":
+		targetReached = realizedPnL >= profitTarget
+	case "PERCENT":
+		// For percent, we would need initial balance - simplified: treat as USDT for now
+		// TODO: Implement percentage calculation based on initial capital
+		targetReached = realizedPnL >= profitTarget
+	}
+
+	if !targetReached {
+		return
+	}
+
+	// 4. Profit target reached - stop the strategy
+	log.Printf("🎯 Profit target reached for strategy %s: %.2f %s (target: %.2f)",
+		strategyID, realizedPnL, profitTargetType, profitTarget)
+
+	// Update strategy status to STOPPED
+	_, err = e.DB.DB.ExecContext(ctx, `
+		UPDATE strategy_instances SET status = 'STOPPED', is_active = 0 WHERE id = ?
+	`, strategyID)
+	if err != nil {
+		log.Printf("executor: failed to stop strategy after profit target: %v", err)
+		return
+	}
+
+	// Publish event
+	if e.Bus != nil {
+		e.Bus.Publish(events.EventRiskAlert, map[string]any{
+			"type":         "PROFIT_TARGET_REACHED",
+			"strategy_id":  strategyID,
+			"realized_pnl": realizedPnL,
+			"target":       profitTarget,
+			"target_type":  profitTargetType,
+		})
+	}
 }

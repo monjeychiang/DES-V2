@@ -26,9 +26,10 @@ const (
 type TimeInForce string
 
 const (
-	TIFGTC TimeInForce = "GTC"
-	TIFIOC TimeInForce = "IOC"
-	TIFFOK TimeInForce = "FOK"
+	TIFGTC TimeInForce = "GTC" // Good Till Cancelled
+	TIFIOC TimeInForce = "IOC" // Immediate Or Cancel
+	TIFFOK TimeInForce = "FOK" // Fill Or Kill
+	TIFGTX TimeInForce = "GTX" // Post Only / Maker Only
 )
 
 // OrderStatus normalizes exchange status into a small set.

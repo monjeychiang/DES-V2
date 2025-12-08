@@ -185,6 +185,17 @@ func ApplyMigrations(d *Database) error {
 		return fmt.Errorf("create strategy_positions table: %w", err)
 	}
 
+	// Phase 2 Features: Maker Only and Profit Target
+	if err := ensureColumn(d.DB, "strategy_instances", "time_in_force", "TEXT DEFAULT 'GTC'"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "strategy_instances", "profit_target", "REAL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "strategy_instances", "profit_target_type", "TEXT DEFAULT 'USDT'"); err != nil {
+		return err
+	}
+
 	return nil
 }
 
