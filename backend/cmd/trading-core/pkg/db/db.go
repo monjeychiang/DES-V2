@@ -43,3 +43,8 @@ func (d *Database) Close() error {
 	}
 	return d.DB.Close()
 }
+
+// Queries returns a UserQueries instance for user-isolated database operations.
+func (d *Database) Queries() *UserQueries {
+	return NewUserQueries(d.DB)
+}

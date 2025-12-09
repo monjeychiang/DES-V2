@@ -18,6 +18,7 @@ type Order struct {
 	Qty                float64
 	FilledQty          float64
 	Status             string
+	UserID             string // Multi-user isolation
 	CreatedAt          time.Time
 }
 
@@ -30,6 +31,7 @@ type Trade struct {
 	Price     float64
 	Qty       float64
 	Fee       float64
+	UserID    string // Multi-user isolation
 	CreatedAt time.Time
 }
 
@@ -38,6 +40,7 @@ type Position struct {
 	Symbol    string
 	Qty       float64
 	AvgPrice  float64
+	UserID    string // Multi-user isolation
 	UpdatedAt time.Time
 }
 
@@ -77,15 +80,18 @@ type User struct {
 
 // Connection represents a user's exchange connection/API key.
 type Connection struct {
-	ID           string
-	UserID       string
-	ExchangeType string
-	Name         string
-	APIKey       string
-	APISecret    string
-	IsActive     bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                 string
+	UserID             string
+	ExchangeType       string
+	Name               string
+	APIKey             string
+	APISecret          string
+	APIKeyEncrypted    string // Phase 1: encrypted storage
+	APISecretEncrypted string // Phase 1: encrypted storage
+	KeyVersion         int    // Phase 1: key version
+	IsActive           bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // CreateOrder inserts a new order row.
