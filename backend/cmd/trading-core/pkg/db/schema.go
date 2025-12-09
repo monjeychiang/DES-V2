@@ -221,6 +221,33 @@ func ApplyMigrations(d *Database) error {
 		return err
 	}
 
+	// Phase 1 Multi-User: Encrypted API Keys
+	if err := ensureColumn(d.DB, "connections", "api_key_encrypted", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "connections", "api_secret_encrypted", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "connections", "key_version", "INTEGER DEFAULT 1"); err != nil {
+		return err
+	}
+
+	// Phase 2 Multi-User: Data Isolation
+	if err := ensureColumn(d.DB, "positions", "user_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "orders", "user_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "trades", "user_id", "TEXT"); err != nil {
+		return err
+	}
+
+	// Add indexes for user_id queries (manual SQL for performance)
+	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_orders_user_time ON orders(user_id, created_at)")
+	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_trades_user_time ON trades(user_id, created_at)")
+	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id)")
+
 	return nil
 }
 
