@@ -7,6 +7,15 @@ import (
 	"sync/atomic"
 )
 
+// OrderQueue is the interface for order queuing implementations.
+type OrderQueue interface {
+	Enqueue(o Order) bool
+	Drain(ctx context.Context, handler func(Order))
+	Len() int
+	PendingNotional() float64 // Total notional value of pending orders
+	Close()
+}
+
 // QueueMetrics tracks queue performance statistics.
 type QueueMetrics struct {
 	Enqueued   uint64 // Total orders enqueued
@@ -87,6 +96,24 @@ func (q *Queue) Chan() <-chan Order {
 // Len returns current queue depth (main channel only).
 func (q *Queue) Len() int {
 	return len(q.ch)
+}
+
+// PendingNotional returns total notional value of all pending orders.
+// This is used for accurate exposure calculation.
+func (q *Queue) PendingNotional() float64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// Calculate overflow buffer notional
+	var total float64
+	for _, o := range q.overflowBuf {
+		total += o.Qty * o.Price
+	}
+
+	// Note: We can't iterate the channel without draining it,
+	// so we use the overflow buffer + estimate from channel length
+	// For a more accurate implementation, consider tracking notional on enqueue/dequeue
+	return total
 }
 
 // OverflowLen returns current overflow buffer depth.

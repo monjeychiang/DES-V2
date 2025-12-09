@@ -39,12 +39,19 @@ type Config struct {
 	DryRunInitialBalance float64
 	DryRunDBPath         string
 
+	// Order persistence
+	EnableOrderWAL bool
+	OrderWALPath   string
+
 	// Database
 	DBPath string
 
 	// Auth / licensing
 	JWTSecret     string
 	LicenseServer string
+
+	// Localization
+	Language string // "en" or "zh"
 }
 
 // Load reads environment variables (optionally via .env) into Config.
@@ -71,9 +78,12 @@ func Load() (*Config, error) {
 		DryRun:                   getEnv("DRY_RUN", "false") == "true",
 		DryRunInitialBalance:     getEnvFloat("DRY_RUN_INITIAL_BALANCE", 10000.0),
 		DryRunDBPath:             getEnv("DRY_RUN_DB_PATH", "./trading_dry.db"),
+		EnableOrderWAL:           getEnv("ENABLE_ORDER_WAL", "true") == "true",
+		OrderWALPath:             getEnv("ORDER_WAL_PATH", "./data/order_wal"),
 		DBPath:                   getEnv("DB_PATH", "./trading.db"),
 		JWTSecret:                getEnv("JWT_SECRET", "dev-secret"),
 		LicenseServer:            getEnv("LICENSE_SERVER", ""),
+		Language:                 getEnv("LANGUAGE", "en"),
 	}, nil
 }
 

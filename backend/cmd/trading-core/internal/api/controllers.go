@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"trading-core/internal/order"
 	"trading-core/pkg/db"
 
 	"github.com/gin-gonic/gin"
@@ -529,13 +530,28 @@ func (s *Server) getQueueMetrics(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order queue not available"})
 		return
 	}
-	metrics := s.OrderQueue.GetMetrics()
-	c.JSON(http.StatusOK, gin.H{
-		"enqueued":       metrics.Enqueued,
-		"dequeued":       metrics.Dequeued,
-		"overflowed":     metrics.Overflowed,
-		"dropped":        metrics.Dropped,
-		"current_depth":  s.OrderQueue.Len(),
-		"overflow_depth": s.OrderQueue.OverflowLen(),
-	})
+
+	response := gin.H{
+		"current_depth": s.OrderQueue.Len(),
+	}
+
+	// Try to get detailed metrics via type assertion
+	if q, ok := s.OrderQueue.(*order.Queue); ok {
+		metrics := q.GetMetrics()
+		response["enqueued"] = metrics.Enqueued
+		response["dequeued"] = metrics.Dequeued
+		response["overflowed"] = metrics.Overflowed
+		response["dropped"] = metrics.Dropped
+		response["overflow_depth"] = q.OverflowLen()
+		response["type"] = "in-memory"
+	} else if pq, ok := s.OrderQueue.(*order.PersistentQueue); ok {
+		metrics := pq.GetMetrics()
+		response["written"] = metrics.Written
+		response["recovered"] = metrics.Recovered
+		response["completed"] = metrics.Completed
+		response["failed"] = metrics.Failed
+		response["type"] = "persistent"
+	}
+
+	c.JSON(http.StatusOK, response)
 }

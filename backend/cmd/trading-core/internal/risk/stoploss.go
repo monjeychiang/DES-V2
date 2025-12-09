@@ -7,12 +7,13 @@ import (
 
 // StopLossManager manages stop loss orders and trailing stops
 type StopLossManager struct {
-	positions map[string]*StopLossPosition
+	positions map[string]*StopLossPosition // key: strategyKey(strategyID, symbol)
 	mu        sync.RWMutex
 }
 
 // StopLossPosition tracks stop loss for a position
 type StopLossPosition struct {
+	StrategyID     string // I4: Strategy ID for per-strategy tracking
 	Symbol         string
 	Side           string // LONG or SHORT
 	EntryPrice     float64
@@ -22,6 +23,14 @@ type StopLossPosition struct {
 	TrailingStop   bool
 	TrailingOffset float64 // Percentage offset
 	HighWaterMark  float64 // For trailing stop
+}
+
+// strategyKey creates a unique key for (strategyID, symbol) pair
+func strategyKey(strategyID, symbol string) string {
+	if strategyID == "" {
+		return symbol // backward compatible
+	}
+	return strategyID + ":" + symbol
 }
 
 // NewStopLossManager creates a new stop loss manager
@@ -42,7 +51,8 @@ func (m *StopLossManager) AddPosition(pos StopLossPosition) {
 		pos.HighWaterMark = pos.EntryPrice
 	}
 
-	m.positions[pos.Symbol] = &pos
+	key := strategyKey(pos.StrategyID, pos.Symbol)
+	m.positions[key] = &pos
 }
 
 // UpdatePrice updates the current price and checks stop loss
@@ -143,4 +153,85 @@ type StopLossDecision struct {
 	Reason    string
 	Action    string // CLOSE
 	Price     float64
+}
+
+// ProtectionOrder represents a protective order (SL or TP).
+type ProtectionOrder struct {
+	Symbol      string
+	Side        string  // BUY or SELL (opposite of position)
+	Type        string  // STOP_MARKET or TAKE_PROFIT_MARKET
+	StopPrice   float64 // Trigger price
+	Qty         float64
+	ReduceOnly  bool
+	IsSL        bool   // true for stop-loss, false for take-profit
+	LinkedOrder string // Original order ID
+}
+
+// GenerateProtectionOrders creates SL/TP orders for a filled position.
+// Returns slice of orders to be enqueued (typically 0-2 orders).
+func (m *StopLossManager) GenerateProtectionOrders(
+	symbol string,
+	positionSide string, // LONG or SHORT
+	qty float64,
+	linkedOrderID string,
+) []ProtectionOrder {
+	m.mu.RLock()
+	pos, exists := m.positions[symbol]
+	m.mu.RUnlock()
+
+	if !exists || pos == nil {
+		return nil
+	}
+
+	var orders []ProtectionOrder
+
+	// Determine exit side (opposite of position)
+	exitSide := "SELL"
+	if positionSide == "SHORT" {
+		exitSide = "BUY"
+	}
+
+	// Stop-Loss order
+	if pos.StopLoss > 0 {
+		orders = append(orders, ProtectionOrder{
+			Symbol:      symbol,
+			Side:        exitSide,
+			Type:        "STOP_MARKET",
+			StopPrice:   pos.StopLoss,
+			Qty:         qty,
+			ReduceOnly:  true,
+			IsSL:        true,
+			LinkedOrder: linkedOrderID,
+		})
+	}
+
+	// Take-Profit order
+	if pos.TakeProfit > 0 {
+		orders = append(orders, ProtectionOrder{
+			Symbol:      symbol,
+			Side:        exitSide,
+			Type:        "TAKE_PROFIT_MARKET",
+			StopPrice:   pos.TakeProfit,
+			Qty:         qty,
+			ReduceOnly:  true,
+			IsSL:        false,
+			LinkedOrder: linkedOrderID,
+		})
+	}
+
+	return orders
+}
+
+// GetAllPositions returns all tracked positions.
+func (m *StopLossManager) GetAllPositions() map[string]StopLossPosition {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]StopLossPosition, len(m.positions))
+	for k, v := range m.positions {
+		if v != nil {
+			result[k] = *v
+		}
+	}
+	return result
 }

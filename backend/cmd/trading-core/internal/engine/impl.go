@@ -20,7 +20,7 @@ type Impl struct {
 	stratEngine *strategy.Engine
 	riskMgr     *risk.Manager
 	balanceMgr  *balance.Manager
-	orderQueue  *order.Queue
+	orderQueue  order.OrderQueue
 	bus         *events.Bus
 	db          *db.Database
 
@@ -33,7 +33,7 @@ type Config struct {
 	StratEngine *strategy.Engine
 	RiskMgr     *risk.Manager
 	BalanceMgr  *balance.Manager
-	OrderQueue  *order.Queue
+	OrderQueue  order.OrderQueue
 	Bus         *events.Bus
 	DB          *db.Database
 	Meta        SystemStatus

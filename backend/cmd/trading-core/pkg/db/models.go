@@ -211,10 +211,16 @@ func (d *Database) UpdateStrategyPosition(ctx context.Context, strategyID, symbo
 	switch strings.ToUpper(side) {
 	case "BUY":
 		newQty := sp.Qty + qty
-		if newQty > 0 {
+		if math.Abs(newQty) < 1e-9 {
+			// Position essentially closed, reset to avoid float precision issues
+			sp.Qty = 0
+			sp.AvgPrice = 0
+		} else if newQty > 0 {
 			sp.AvgPrice = (sp.AvgPrice*sp.Qty + price*qty) / newQty
+			sp.Qty = newQty
+		} else {
+			sp.Qty = newQty
 		}
-		sp.Qty = newQty
 	case "SELL":
 		closeQty := math.Min(sp.Qty, qty)
 		if closeQty > 0 {

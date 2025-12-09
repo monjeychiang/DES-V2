@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS strategies (
 
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
+    strategy_instance_id TEXT,
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     price REAL NOT NULL,
@@ -127,6 +128,27 @@ CREATE TABLE IF NOT EXISTS strategy_positions (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(strategy_instance_id) REFERENCES strategy_instances(id)
 );
+
+CREATE TABLE IF NOT EXISTS strategy_risk_configs (
+    strategy_instance_id TEXT PRIMARY KEY,
+    -- Position & Order limits
+    max_position_size REAL,
+    min_order_size REAL,
+    max_order_size REAL,
+    -- Stop Loss / Take Profit
+    stop_loss REAL,
+    take_profit REAL,
+    use_trailing_stop INTEGER DEFAULT 0,
+    trailing_percent REAL DEFAULT 0.015,
+    -- Enable switch
+    enable_risk INTEGER DEFAULT 1,
+    -- Feature toggles
+    use_position_size_limit INTEGER DEFAULT 1,
+    use_order_size_limits INTEGER DEFAULT 1,
+    -- Metadata
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(strategy_instance_id) REFERENCES strategy_instances(id)
+);
 `
 
 // ApplyMigrations bootstraps the schema; keep lightweight for fast startup.
@@ -140,6 +162,9 @@ func ApplyMigrations(d *Database) error {
 
 	// Lightweight, idempotent migrations for older DB files.
 	if err := ensureColumn(d.DB, "orders", "filled_qty", "REAL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(d.DB, "orders", "strategy_instance_id", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(d.DB, "trades", "side", "TEXT NOT NULL DEFAULT ''"); err != nil {

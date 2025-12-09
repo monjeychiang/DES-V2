@@ -24,7 +24,7 @@ type Server struct {
 
 	// Monitoring (kept as they provide direct metrics access)
 	Metrics    *monitor.SystemMetrics
-	OrderQueue *order.Queue
+	OrderQueue order.OrderQueue
 
 	JWTSecret string
 	Meta      SystemMeta
@@ -45,7 +45,7 @@ func NewServer(
 	database *db.Database,
 	eng engine.Service,
 	metrics *monitor.SystemMetrics,
-	orderQueue *order.Queue,
+	orderQueue order.OrderQueue,
 	meta SystemMeta,
 	jwtSecret string,
 ) *Server {

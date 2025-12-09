@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"math"
 	"sync"
 
 	"trading-core/pkg/db"
@@ -72,14 +73,55 @@ func (m *Manager) RecordFill(ctx context.Context, symbol, side string, qty, pric
 	switch side {
 	case "BUY":
 		newQty = oldQty + qty
-		if newQty != 0 {
-			newAvg = (oldAvg*oldQty + price*qty) / newQty
-		} else {
+		if math.Abs(newQty) < 1e-9 {
+			// Position essentially closed, reset to avoid float precision issues
+			newQty = 0
 			newAvg = 0
+		} else if oldQty >= 0 {
+			// Adding to long or opening long from neutral
+			if newQty > 0 {
+				newAvg = (oldAvg*oldQty + price*qty) / newQty
+			} else {
+				// Flipped to short - use buy price as new average
+				newAvg = price
+			}
+		} else {
+			// Covering short position
+			if newQty < 0 {
+				// Still short, keep existing short average
+				newAvg = oldAvg
+			} else {
+				// Flipped to long - use buy price as new average
+				newAvg = price
+			}
 		}
 	case "SELL":
 		newQty = oldQty - qty
-		newAvg = oldAvg // keep average from existing; realized PnL tracking can be added later
+		if math.Abs(newQty) < 1e-9 {
+			// Position essentially closed, reset to avoid float precision issues
+			newQty = 0
+			newAvg = 0
+		} else if oldQty <= 0 {
+			// Adding to short or opening short from neutral
+			if newQty < 0 {
+				// Calculate weighted average for short position
+				oldNotional := math.Abs(oldQty) * oldAvg
+				newNotional := qty * price
+				newAvg = (oldNotional + newNotional) / math.Abs(newQty)
+			} else {
+				// Flipped to long - shouldn't happen but handle anyway
+				newAvg = price
+			}
+		} else {
+			// Closing long position
+			if newQty > 0 {
+				// Still long, keep existing long average
+				newAvg = oldAvg
+			} else {
+				// Flipped to short - use sell price as new average
+				newAvg = price
+			}
+		}
 	default:
 		newQty = oldQty
 		newAvg = oldAvg
