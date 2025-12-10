@@ -33,7 +33,7 @@ MASTER_ENCRYPTION_KEY=your-32-byte-base64-key-here
 JWT_SECRET=your-jwt-secret
 
 # 其他標準設定
-DATABASE_PATH=./data/trading.db
+DB_PATH=./data/trading.db
 ```
 
 ### 1.2 資料庫遷移
@@ -54,7 +54,7 @@ DATABASE_PATH=./data/trading.db
 ### 2.1 註冊新用戶
 
 ```http
-POST /api/v1/auth/register
+POST /api/auth/register
 Content-Type: application/json
 
 {
@@ -75,7 +75,7 @@ Content-Type: application/json
 ### 2.2 用戶登入
 
 ```http
-POST /api/v1/auth/login
+POST /api/auth/login
 Content-Type: application/json
 
 {
@@ -107,7 +107,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 ### 3.1 新增交易所連線（API Key 自動加密）
 
 ```http
-POST /api/v1/connections
+POST /api/connections
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -136,7 +136,7 @@ Content-Type: application/json
 ### 3.2 查看我的連線列表
 
 ```http
-GET /api/v1/connections
+GET /api/connections
 Authorization: Bearer {token}
 ```
 
@@ -161,7 +161,7 @@ Authorization: Bearer {token}
 ### 3.3 停用連線
 
 ```http
-DELETE /api/v1/connections/conn_xyz789
+DELETE /api/connections/conn_xyz789
 Authorization: Bearer {token}
 ```
 
@@ -172,7 +172,7 @@ Authorization: Bearer {token}
 ### 4.1 創建策略並綁定連線
 
 ```http
-POST /api/v1/strategies
+POST /api/strategies
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -193,7 +193,7 @@ Content-Type: application/json
 ### 4.2 手動下單（指定連線）
 
 ```http
-POST /api/v1/orders
+POST /api/orders
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -242,7 +242,7 @@ Content-Type: application/json
 ### 4.3 查詢我的訂單
 
 ```http
-GET /api/v1/orders
+GET /api/orders
 Authorization: Bearer {token}
 ```
 
@@ -264,7 +264,7 @@ Authorization: Bearer {token}
 ### 4.4 查詢我的持倉
 
 ```http
-GET /api/v1/positions
+GET /api/positions
 Authorization: Bearer {token}
 ```
 
@@ -348,17 +348,17 @@ echo "MASTER_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
 go run main.go
 
 # 3. 註冊用戶
-curl -X POST http://localhost:8080/api/v1/auth/register \
+curl -X POST http://localhost:8080/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"username":"demo","email":"demo@example.com","password":"Demo123!"}'
 
 # 4. 登入取得 token
-TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"demo@example.com","password":"Demo123!"}' | jq -r '.token')
 
 # 5. 新增交易所連線
-curl -X POST http://localhost:8080/api/v1/connections \
+curl -X POST http://localhost:8080/api/connections \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"My Binance","exchange_type":"binance-spot","api_key":"xxx","api_secret":"yyy"}'

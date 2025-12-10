@@ -244,6 +244,12 @@ func main() {
 	dryRunner := order.NewDryRunExecutor(mode, exec, cfg.DryRunInitialBalance)
 	asyncExec := order.NewAsyncExecutorWithDryRun(dryRunner, 4) // V2 P0-B: Async Execution
 
+	// Multi-user: inject KeyManager for API key decryption
+	if keyMgr != nil {
+		exec.SetKeyManager(keyMgr)
+		log.Println("🔐 KeyManager injected into Executor")
+	}
+
 	// System metrics for monitoring
 	sysMetrics := monitor.NewSystemMetrics()
 	log.Println(i18n.Get("SystemMetricsInit"))

@@ -98,10 +98,10 @@ type Connection struct {
 func (d *Database) CreateOrder(ctx context.Context, o Order) error {
 	_, err := d.DB.ExecContext(ctx, `
 		INSERT INTO orders (
-			id, strategy_instance_id, symbol, side, price, qty, filled_qty, status, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+			id, strategy_instance_id, symbol, side, price, qty, filled_qty, status, user_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
 	`,
-		o.ID, o.StrategyInstanceID, o.Symbol, o.Side, o.Price, o.Qty, o.FilledQty, o.Status, o.CreatedAt,
+		o.ID, o.StrategyInstanceID, o.Symbol, o.Side, o.Price, o.Qty, o.FilledQty, o.Status, o.UserID, o.CreatedAt,
 	)
 	return err
 }
@@ -110,10 +110,10 @@ func (d *Database) CreateOrder(ctx context.Context, o Order) error {
 func (d *Database) CreateTrade(ctx context.Context, t Trade) error {
 	_, err := d.DB.ExecContext(ctx, `
 		INSERT INTO trades (
-			id, order_id, symbol, side, price, qty, fee, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+			id, order_id, symbol, side, price, qty, fee, user_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
 	`,
-		t.ID, t.OrderID, t.Symbol, t.Side, t.Price, t.Qty, t.Fee, t.CreatedAt,
+		t.ID, t.OrderID, t.Symbol, t.Side, t.Price, t.Qty, t.Fee, t.UserID, t.CreatedAt,
 	)
 	return err
 }
@@ -283,7 +283,25 @@ func (d *Database) GetUserByEmail(ctx context.Context, email string) (*User, err
 }
 
 // CreateConnection inserts a new exchange connection.
+// Supports both encrypted and plaintext API keys for backward compatibility.
 func (d *Database) CreateConnection(ctx context.Context, c Connection) error {
+	// Use encrypted fields if available, otherwise use plaintext
+	if c.APIKeyEncrypted != "" && c.APISecretEncrypted != "" {
+		_, err := d.DB.ExecContext(ctx, `
+			INSERT INTO connections (
+				id, user_id, exchange_type, name, 
+				api_key_encrypted, api_secret_encrypted, key_version,
+				is_active, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+		`,
+			c.ID, c.UserID, c.ExchangeType, c.Name,
+			c.APIKeyEncrypted, c.APISecretEncrypted, c.KeyVersion,
+			c.IsActive, c.CreatedAt, c.UpdatedAt,
+		)
+		return err
+	}
+
+	// Fallback to plaintext (legacy mode)
 	_, err := d.DB.ExecContext(ctx, `
 		INSERT INTO connections (
 			id, user_id, exchange_type, name, api_key, api_secret, is_active, created_at, updated_at
