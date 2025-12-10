@@ -104,9 +104,15 @@ func nullableString(ns sql.NullString) *string {
 	return nil
 }
 
-// getOrders returns recent orders.
+// getOrders returns recent orders for the authenticated user.
 func (s *Server) getOrders(c *gin.Context) {
-	orders, err := s.DB.ListOpenOrders(c.Request.Context())
+	userID := CurrentUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	orders, err := s.DB.Queries().GetOrdersByUser(c.Request.Context(), userID, 100)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -114,9 +120,15 @@ func (s *Server) getOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, orders)
 }
 
-// getPositions returns current positions.
+// getPositions returns current positions for the authenticated user.
 func (s *Server) getPositions(c *gin.Context) {
-	positions, err := s.DB.ListPositions(c.Request.Context())
+	userID := CurrentUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	positions, err := s.DB.Queries().GetPositionsByUser(c.Request.Context(), userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
