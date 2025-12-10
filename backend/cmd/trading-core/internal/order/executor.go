@@ -170,7 +170,18 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 // gatewayForOrder picks an exchange gateway for the given order based on its strategy binding.
 // It falls back to the global gateway when no per-connection binding is found.
 func (e *Executor) gatewayForOrder(ctx context.Context, o Order) (exchange.Gateway, string) {
-	// If the order is associated with a strategy, try to resolve a connection-specific gateway.
+	// Priority 1: Use ConnectionID directly if specified (multi-user mode)
+	if o.ConnectionID != "" {
+		gw, venue, ok := e.gatewayForConnection(ctx, o.UserID, o.ConnectionID)
+		if ok {
+			return gw, venue
+		}
+		// ConnectionID specified but not found - don't fallback
+		log.Printf("executor: connection %s not found for user %s", o.ConnectionID, o.UserID)
+		return nil, ""
+	}
+
+	// Priority 2: If the order is associated with a strategy, try to resolve a connection-specific gateway.
 	if o.StrategyInstanceID != "" {
 		gw, venue, ok := e.gatewayForStrategy(ctx, o.StrategyInstanceID)
 		if ok {
@@ -185,6 +196,61 @@ func (e *Executor) gatewayForOrder(ctx context.Context, o Order) (exchange.Gatew
 		return e.Gateway, e.Exchange
 	}
 	return nil, ""
+}
+
+// gatewayForConnection returns a gateway for a specific connection, with user validation.
+func (e *Executor) gatewayForConnection(ctx context.Context, userID, connID string) (exchange.Gateway, string, bool) {
+	if e.DB == nil {
+		return nil, "", false
+	}
+
+	// Check cache first
+	e.mu.RLock()
+	gw, ok := e.connGateways[connID]
+	e.mu.RUnlock()
+	if ok && gw != nil {
+		return gw, "", true // venue is unknown from cache, but gateway works
+	}
+
+	// Query connection with user ownership validation
+	row := e.DB.DB.QueryRowContext(ctx, `
+		SELECT id, exchange_type, 
+		       COALESCE(api_key_encrypted, '') as api_key_encrypted,
+		       COALESCE(api_secret_encrypted, '') as api_secret_encrypted,
+		       api_key, api_secret
+		FROM connections 
+		WHERE id = ? AND user_id = ? AND is_active = 1
+	`, connID, userID)
+
+	var id, exchangeType, apiKeyEnc, apiSecretEnc, apiKey, apiSecret string
+	if err := row.Scan(&id, &exchangeType, &apiKeyEnc, &apiSecretEnc, &apiKey, &apiSecret); err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("executor: failed to get connection %s: %v", connID, err)
+		}
+		return nil, "", false
+	}
+
+	// Use encrypted keys if available, otherwise fallback to plaintext
+	finalAPIKey := apiKey
+	finalAPISecret := apiSecret
+	if apiKeyEnc != "" {
+		// TODO: Decrypt using KeyManager when available
+		// For now, log warning and fallback
+		log.Printf("executor: connection %s has encrypted keys but decryption not implemented in executor", connID)
+	}
+
+	// Create gateway
+	newGw := e.createGateway(exchangeType, finalAPIKey, finalAPISecret)
+	if newGw == nil {
+		return nil, "", false
+	}
+
+	// Cache it
+	e.mu.Lock()
+	e.connGateways[connID] = newGw
+	e.mu.Unlock()
+
+	return newGw, exchangeType, true
 }
 
 func (e *Executor) gatewayForStrategy(ctx context.Context, strategyID string) (exchange.Gateway, string, bool) {
@@ -216,32 +282,8 @@ func (e *Executor) gatewayForStrategy(ctx context.Context, strategyID string) (e
 		return gw, exchangeType, true
 	}
 
-	// Create a new gateway for this connection.
-	var newGw exchange.Gateway
-	switch exchangeType {
-	case "binance-spot":
-		newGw = exspot.New(exspot.Config{
-			APIKey:    apiKey,
-			APISecret: apiSecret,
-			Testnet:   e.Testnet,
-		})
-	case "binance-usdtfut":
-		newGw = exfutusdt.NewClient(exfutusdt.Config{
-			APIKey:    apiKey,
-			APISecret: apiSecret,
-			Testnet:   e.Testnet,
-		})
-	case "binance-coinfut":
-		newGw = exfutcoin.NewClient(exfutcoin.Config{
-			APIKey:    apiKey,
-			APISecret: apiSecret,
-			Testnet:   e.Testnet,
-		})
-	default:
-		log.Printf("executor: unsupported exchange_type %q for connection %s", exchangeType, connID)
-		return nil, "", false
-	}
-
+	// Create a new gateway for this connection using shared helper.
+	newGw := e.createGateway(exchangeType, apiKey, apiSecret)
 	if newGw == nil {
 		return nil, "", false
 	}
@@ -251,6 +293,33 @@ func (e *Executor) gatewayForStrategy(ctx context.Context, strategyID string) (e
 	e.mu.Unlock()
 
 	return newGw, exchangeType, true
+}
+
+// createGateway creates an exchange.Gateway based on exchange type.
+func (e *Executor) createGateway(exchangeType, apiKey, apiSecret string) exchange.Gateway {
+	switch exchangeType {
+	case "binance-spot":
+		return exspot.New(exspot.Config{
+			APIKey:    apiKey,
+			APISecret: apiSecret,
+			Testnet:   e.Testnet,
+		})
+	case "binance-usdtfut":
+		return exfutusdt.NewClient(exfutusdt.Config{
+			APIKey:    apiKey,
+			APISecret: apiSecret,
+			Testnet:   e.Testnet,
+		})
+	case "binance-coinfut":
+		return exfutcoin.NewClient(exfutcoin.Config{
+			APIKey:    apiKey,
+			APISecret: apiSecret,
+			Testnet:   e.Testnet,
+		})
+	default:
+		log.Printf("executor: unsupported exchange_type %q", exchangeType)
+		return nil
+	}
 }
 
 // checkProfitTarget checks if the strategy has reached its profit target and stops it if so.

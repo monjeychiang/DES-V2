@@ -312,12 +312,32 @@ func (s *Server) createConnection(c *gin.Context) {
 		UserID:       userID,
 		ExchangeType: req.ExchangeType,
 		Name:         req.Name,
-		APIKey:       req.APIKey,
-		APISecret:    req.APISecret,
 		IsActive:     true,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
+
+	// Use encryption if KeyManager is available
+	if s.KeyManager != nil {
+		encKey, err := s.KeyManager.Encrypt(req.APIKey)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt api_key"})
+			return
+		}
+		encSecret, err := s.KeyManager.Encrypt(req.APISecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt api_secret"})
+			return
+		}
+		conn.APIKeyEncrypted = encKey
+		conn.APISecretEncrypted = encSecret
+		conn.KeyVersion = 1 // Current key version
+	} else {
+		// Fallback to plaintext (legacy mode)
+		conn.APIKey = req.APIKey
+		conn.APISecret = req.APISecret
+	}
+
 	if err := s.DB.CreateConnection(c.Request.Context(), conn); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -328,6 +348,7 @@ func (s *Server) createConnection(c *gin.Context) {
 		"name":          conn.Name,
 		"exchange_type": conn.ExchangeType,
 		"is_active":     conn.IsActive,
+		"encrypted":     s.KeyManager != nil,
 		"created_at":    conn.CreatedAt,
 		"updated_at":    conn.UpdatedAt,
 	})

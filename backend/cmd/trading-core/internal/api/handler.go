@@ -26,8 +26,17 @@ type Server struct {
 	Metrics    *monitor.SystemMetrics
 	OrderQueue order.OrderQueue
 
+	// Multi-user: API key encryption manager (optional, nil = plaintext)
+	KeyManager KeyManager
+
 	JWTSecret string
 	Meta      SystemMeta
+}
+
+// KeyManager interface for API key encryption.
+type KeyManager interface {
+	Encrypt(plaintext string) (string, error)
+	Decrypt(ciphertext string) (string, error)
 }
 
 // SystemMeta describes runtime status exposed to the UI.
