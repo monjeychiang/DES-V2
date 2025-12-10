@@ -1,9 +1,24 @@
 # 多用戶多帳戶架構改造文檔
 
-> **版本**: 2.0  
+> **版本**: 2.1  
 > **日期**: 2025-12-10  
-> **狀態**: 規劃中  
+> **狀態**: ✅ 已實作 (feature/multi-user 分支)  
 > **編碼**: UTF-8
+
+---
+
+## 實作完成記錄
+
+| Phase | 說明 | 狀態 | 提交 |
+|-------|------|------|------|
+| Phase 1 | API Key 加密 | ✅ 完成 | `pkg/crypto/encryption.go`, `key_manager.go` |
+| Phase 2 | 資料隔離 | ✅ 完成 | `pkg/db/queries.go`, models.go 更新 |
+| Phase 3 | Gateway 管理 | ✅ 完成 | `internal/gateway/manager.go`, `factory.go` |
+| Phase 4 | 訂單路由 | ✅ 完成 | `internal/order/types.go` 更新 |
+| Phase 5 | 餘額/風控隔離 | ✅ 完成 | `balance/multi_user.go`, `risk/multi_user.go` |
+| 整合 | main.go | ✅ 完成 | KeyManager, GatewayManager 初始化 |
+| 整合 | API Handler | ✅ 完成 | controllers.go 使用 UserQueries |
+| 測試 | 單元測試 | ✅ 通過 | `queries_test.go`, `encryption_test.go` |
 
 ---
 
