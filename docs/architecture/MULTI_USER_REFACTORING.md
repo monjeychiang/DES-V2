@@ -20,6 +20,8 @@
 | 整合 | API Handler | ✅ 完成 | controllers.go 使用 UserQueries |
 | 整合 | Executor 路由 | ✅ 完成 | `gatewayForConnection` 支援 ConnectionID |
 | 整合 | Connection 加密 | ✅ 完成 | `createConnection` 使用 KeyManager |
+| 整合 | Executor 解密 | ✅ 完成 | `gatewayForConnection` 使用 KeyManager 解密 |
+| 整合 | Engine 風控 | ✅ 完成 | Engine 添加 `multiUserRiskMgr` 欄位 |
 | 測試 | 單元測試 | ✅ 通過 | `queries_test.go`, `encryption_test.go` |
 
 ---
