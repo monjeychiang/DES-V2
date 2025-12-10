@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -139,4 +140,70 @@ func TestUserQueriesDataIsolation(t *testing.T) {
 			t.Errorf("expected 0 orders, got %d", len(orders))
 		}
 	})
+}
+
+// TestUserPositionsConcurrentUpserts verifies that user_positions can be safely
+// updated concurrently for multiple users on the same symbol without conflicts.
+func TestUserPositionsConcurrentUpserts(t *testing.T) {
+	database, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	if err := ApplyMigrations(database); err != nil {
+		t.Fatalf("Failed to apply migrations: %v", err)
+	}
+
+	q := database.Queries()
+	ctx := context.Background()
+
+	const users = 5
+	symbol := "BTCUSDT"
+
+	errCh := make(chan error, users)
+
+	for i := 0; i < users; i++ {
+		userID := "user-concurrent-" + strconv.Itoa(i)
+		go func(uid string) {
+			// Each user upserts their own position on the same symbol.
+			if err := q.UpsertPositionWithUser(ctx, uid, symbol, 0.01, 30000); err != nil {
+				errCh <- err
+				return
+			}
+			errCh <- nil
+		}(userID)
+	}
+
+	for i := 0; i < users; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("UpsertPositionWithUser failed: %v", err)
+		}
+	}
+
+	// Verify that we have exactly one row per user for the symbol.
+	rows, err := database.DB.QueryContext(ctx, `SELECT user_id, symbol, qty FROM user_positions WHERE symbol = ?`, symbol)
+	if err != nil {
+		t.Fatalf("query user_positions: %v", err)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		count++
+		var uid, sym string
+		var qty float64
+		if err := rows.Scan(&uid, &sym, &qty); err != nil {
+			t.Fatalf("scan user_positions: %v", err)
+		}
+		if sym != symbol {
+			t.Fatalf("unexpected symbol %s in user_positions", sym)
+		}
+		if qty != 0.01 {
+			t.Fatalf("unexpected qty %f for user %s", qty, uid)
+		}
+	}
+	if count != users {
+		t.Fatalf("expected %d rows in user_positions, got %d", users, count)
+	}
 }

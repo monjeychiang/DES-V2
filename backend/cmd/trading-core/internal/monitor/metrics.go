@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"trading-core/internal/gateway"
 )
 
 // SystemMetrics tracks overall system performance.
@@ -22,6 +24,11 @@ type SystemMetrics struct {
 	ticksProcessed   uint64
 	signalsGenerated uint64
 	errorsCount      uint64
+
+	// Gateway pool & multi-user stats (updated periodically from main).
+	gatewayStats     gateway.PoolStats
+	riskActiveUsers  int
+	balanceActiveUsers int
 
 	// Snapshot
 	lastUpdate time.Time
@@ -158,6 +165,9 @@ type MetricsSnapshot struct {
 	TicksProcessed   uint64       `json:"ticks_processed"`
 	SignalsGenerated uint64       `json:"signals_generated"`
 	ErrorsCount      uint64       `json:"errors_count"`
+	GatewayPool      gateway.PoolStats `json:"gateway_pool"`
+	RiskActiveUsers  int               `json:"risk_active_users"`
+	BalanceActiveUsers int             `json:"balance_active_users"`
 	GoroutineCount   int          `json:"goroutine_count"`
 	HeapAlloc        uint64       `json:"heap_alloc_bytes"`
 	HeapSys          uint64       `json:"heap_sys_bytes"`
@@ -169,6 +179,12 @@ func (m *SystemMetrics) GetSnapshot() MetricsSnapshot {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
+	m.mu.RLock()
+	gwStats := m.gatewayStats
+	riskUsers := m.riskActiveUsers
+	balanceUsers := m.balanceActiveUsers
+	m.mu.RUnlock()
+
 	return MetricsSnapshot{
 		OrderLatency:     m.OrderLatency.Stats(),
 		StrategyLatency:  m.StrategyLatency.Stats(),
@@ -177,11 +193,29 @@ func (m *SystemMetrics) GetSnapshot() MetricsSnapshot {
 		TicksProcessed:   atomic.LoadUint64(&m.ticksProcessed),
 		SignalsGenerated: atomic.LoadUint64(&m.signalsGenerated),
 		ErrorsCount:      atomic.LoadUint64(&m.errorsCount),
+		GatewayPool:      gwStats,
+		RiskActiveUsers:  riskUsers,
+		BalanceActiveUsers: balanceUsers,
 		GoroutineCount:   runtime.NumGoroutine(),
 		HeapAlloc:        memStats.HeapAlloc,
 		HeapSys:          memStats.HeapSys,
 		Timestamp:        time.Now(),
 	}
+}
+
+// SetGatewayPoolStats updates gateway pool statistics.
+func (m *SystemMetrics) SetGatewayPoolStats(stats gateway.PoolStats) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gatewayStats = stats
+}
+
+// SetMultiUserCounts updates active user counts for risk/balance managers.
+func (m *SystemMetrics) SetMultiUserCounts(riskUsers, balanceUsers int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.riskActiveUsers = riskUsers
+	m.balanceActiveUsers = balanceUsers
 }
 
 // Timer helps measure operation duration.

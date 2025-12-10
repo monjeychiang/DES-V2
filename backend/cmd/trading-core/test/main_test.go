@@ -114,7 +114,7 @@ func TestFullWorkflow(t *testing.T) {
 	t.Run("PositionManagement", func(t *testing.T) {
 		log.Println("\n📊 Test 3: Position Management")
 
-		pos, err := stateMgr.RecordFill(ctx, "BTCUSDT", "BUY", 0.01, 50000.0)
+		pos, err := stateMgr.RecordFill(ctx, "", "BTCUSDT", "BUY", 0.01, 50000.0)
 		if err != nil {
 			t.Errorf("RecordFill failed: %v", err)
 		} else {

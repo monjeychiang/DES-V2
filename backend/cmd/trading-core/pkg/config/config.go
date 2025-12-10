@@ -59,6 +59,12 @@ func Load() (*Config, error) {
 	// Ignore error so the app still starts when .env is missing.
 	_ = godotenv.Load()
 
+	// Database path: prefer DB_PATH, then DATABASE_PATH for backward compatibility.
+	dbPath := getEnv("DB_PATH", "")
+	if dbPath == "" {
+		dbPath = getEnv("DATABASE_PATH", "./data/trading.db")
+	}
+
 	return &Config{
 		Port:                     getEnv("PORT", "8080"),
 		BinanceTestnet:           getEnv("BINANCE_TESTNET", "false") == "true",
@@ -80,7 +86,7 @@ func Load() (*Config, error) {
 		DryRunDBPath:             getEnv("DRY_RUN_DB_PATH", "./trading_dry.db"),
 		EnableOrderWAL:           getEnv("ENABLE_ORDER_WAL", "true") == "true",
 		OrderWALPath:             getEnv("ORDER_WAL_PATH", "./data/order_wal"),
-		DBPath:                   getEnv("DB_PATH", "./trading.db"),
+		DBPath:                   dbPath,
 		JWTSecret:                getEnv("JWT_SECRET", "dev-secret"),
 		LicenseServer:            getEnv("LICENSE_SERVER", ""),
 		Language:                 getEnv("LANGUAGE", "en"),

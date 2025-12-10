@@ -3,15 +3,95 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"trading-core/internal/order"
 	"trading-core/pkg/db"
+	exchange "trading-core/pkg/exchanges/common"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+// createStrategy creates a new strategy instance bound to the current user (and optional connection).
+func (s *Server) createStrategy(c *gin.Context) {
+	userID := CurrentUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	var req struct {
+		Name         string         `json:"name"`
+		StrategyType string         `json:"strategy_type"`
+		Symbol       string         `json:"symbol"`
+		Interval     string         `json:"interval"`
+		ConnectionID string         `json:"connection_id"`
+		Parameters   map[string]any `json:"parameters"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+	if req.Name == "" || req.StrategyType == "" || req.Symbol == "" || req.Interval == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name, strategy_type, symbol, interval are required"})
+		return
+	}
+
+	// If connection_id provided, validate ownership and active status.
+	if req.ConnectionID != "" {
+		conn, err := s.DB.Queries().GetConnectionByID(c.Request.Context(), userID, req.ConnectionID)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection for current user"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			}
+			return
+		}
+		if !conn.IsActive {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "connection is not active"})
+			return
+		}
+	}
+
+	paramsJSON, err := json.Marshal(req.Parameters)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parameters"})
+		return
+	}
+
+	now := time.Now()
+	id := uuid.NewString()
+	_, err = s.DB.DB.Exec(`
+		INSERT INTO strategy_instances (
+			id, name, strategy_type, symbol, interval, parameters,
+			user_id, connection_id, is_active, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+	`, id, req.Name, req.StrategyType, req.Symbol, req.Interval, string(paramsJSON),
+		userID, req.ConnectionID, now, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":            id,
+		"name":          req.Name,
+		"strategy_type": req.StrategyType,
+		"symbol":        req.Symbol,
+		"interval":      req.Interval,
+		"parameters":    req.Parameters,
+		"user_id":       userID,
+		"connection_id": req.ConnectionID,
+		"is_active":     false,
+		"created_at":    now,
+		"updated_at":    now,
+	})
+}
 
 // getStrategies returns all configured strategies.
 func (s *Server) getStrategies(c *gin.Context) {
@@ -136,8 +216,111 @@ func (s *Server) getPositions(c *gin.Context) {
 	c.JSON(http.StatusOK, positions)
 }
 
+// createOrder submits a manual order for the authenticated user on a specific connection.
+func (s *Server) createOrder(c *gin.Context) {
+	userID := CurrentUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	if s.OrderQueue == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order queue not available"})
+		return
+	}
+
+	var req struct {
+		Symbol       string  `json:"symbol"`
+		Side         string  `json:"side"`
+		Type         string  `json:"type"`
+		Price        float64 `json:"price"`
+		Qty          float64 `json:"qty"`
+		ConnectionID string  `json:"connection_id"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+	if req.Symbol == "" || req.Side == "" || req.Type == "" || req.Qty <= 0 || req.ConnectionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol, side, type, qty, connection_id are required"})
+		return
+	}
+
+	// Validate connection ownership and status.
+	conn, err := s.DB.Queries().GetConnectionByID(c.Request.Context(), userID, req.ConnectionID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection for current user"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	// If connection uses encrypted keys but KeyManager is not configured, treat as server misconfiguration.
+	if conn.APIKeyEncrypted != "" && s.KeyManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypted connection requires KeyManager"})
+		return
+	}
+	if !conn.IsActive {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "connection is not active"})
+		return
+	}
+
+	// Map exchange type to market.
+	var market string
+	switch conn.ExchangeType {
+	case "binance-spot":
+		market = string(exchange.MarketSpot)
+	case "binance-usdtfut":
+		market = string(exchange.MarketUSDTFut)
+	case "binance-coinfut":
+		market = string(exchange.MarketCoinFut)
+	}
+
+	o := order.Order{
+		ID:           uuid.NewString(),
+		Symbol:       req.Symbol,
+		Side:         strings.ToUpper(req.Side),
+		Type:         strings.ToUpper(req.Type),
+		Price:        req.Price,
+		Qty:          req.Qty,
+		Status:       "NEW",
+		CreatedAt:    time.Now(),
+		Market:       market,
+		UserID:       userID,
+		ConnectionID: conn.ID,
+	}
+
+	s.OrderQueue.Enqueue(o)
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"id":            o.ID,
+		"symbol":        o.Symbol,
+		"side":          o.Side,
+		"type":          o.Type,
+		"price":         o.Price,
+		"qty":           o.Qty,
+		"status":        o.Status,
+		"connection_id": o.ConnectionID,
+	})
+}
+
 // getBalance returns current balance information.
 func (s *Server) getBalance(c *gin.Context) {
+	// Prefer per-user balance when multi-user manager is available.
+	userID := CurrentUserID(c)
+	if userID != "" && s.UserBalances != nil {
+		if mgr, err := s.UserBalances.GetOrCreate(userID); err == nil && mgr != nil {
+			b := mgr.GetBalance()
+			c.JSON(http.StatusOK, gin.H{
+				"available": b.Available,
+				"locked":    b.Locked,
+				"total":     b.Total,
+			})
+			return
+		}
+	}
+
+	// Fallback to global engine balance.
 	bal, err := s.Engine.GetBalance(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
@@ -331,16 +514,21 @@ func (s *Server) createConnection(c *gin.Context) {
 		}
 		conn.APIKeyEncrypted = encKey
 		conn.APISecretEncrypted = encSecret
-		conn.KeyVersion = 1 // Current key version
+		conn.KeyVersion = s.KeyManager.CurrentVersion()
+
+		if err := s.DB.Queries().CreateConnectionEncrypted(c.Request.Context(), conn); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	} else {
 		// Fallback to plaintext (legacy mode)
 		conn.APIKey = req.APIKey
 		conn.APISecret = req.APISecret
-	}
 
-	if err := s.DB.CreateConnection(c.Request.Context(), conn); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		if err := s.DB.CreateConnection(c.Request.Context(), conn); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -369,6 +557,10 @@ func (s *Server) deactivateConnection(c *gin.Context) {
 	}
 
 	if err := s.DB.DeactivateConnection(c.Request.Context(), id, userID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "connection does not belong to current user"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

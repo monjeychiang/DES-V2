@@ -12,6 +12,7 @@
 DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量化交易系統，採用 Go + Python 混合架構，提供:
 
 - **高性能交易引擎** - Go 語言實現的低延遲訂單執行
+- **多用戶多帳戶** - 完整資料隔離，支援 SaaS 部署
 - **靈活策略框架** - Python 策略開發與回測環境
 - **實時風險管理** - 多層次風險控制與監控
 - **Web 管理介面** - React 前端提供直觀的系統管理
@@ -97,6 +98,8 @@ DES Trading System V2.0 是一個專為加密貨幣交易設計的高性能量�
 | 文件 | 說明 |
 |------|------|
 | [系統架構](docs/architecture/SYSTEM_ARCHITECTURE.md) | 完整的系統架構說明 |
+| [多用戶架構](docs/architecture/MULTI_USER_REFACTORING.md) | 多用戶多帳戶設計 |
+| [多用戶使用指南](docs/guides/MULTI_USER_USAGE_GUIDE.md) | API 使用流程 |
 | [開發者入門](docs/process/DEVELOPER_ONBOARDING.md) | 新手開發指南 |
 | [快速參考](docs/setup/QUICK_REFERENCE.md) | 常用指令與 API 參考 |
 
@@ -147,8 +150,9 @@ DES-V2/
 | 訂單執行 | ✅ | 同步/異步執行，含 Worker Pool |
 | 風險控制 | ✅ | 多層次風險檢查，止損/止盈 |
 | 倉位追蹤 | ✅ | 實時對帳，支援 User Data Stream |
+| **多用戶架構** | ✅ | 資料隔離、API Key 加密、Per-User 風控 |
 | Engine 服務層 | ✅ | 介面隔離架構 (Phase 1 完成) |
-| REST API | ✅ | 完整 CRUD + Auth |
+| REST API | ✅ | 完整 CRUD + JWT Auth |
 | React 管理後台 | ✅ | 實時儀表板 |
 
 ### 🚧 規劃中
@@ -173,8 +177,14 @@ V2 版本包含多項性能優化：
 - **Async Executor** - 非阻塞訂單執行
 - **Lazy Stats** - O(1) 統計查詢
 - **Batched Drain** - 減少鎖競爭
+- **Multi-User Sharding** - 索引優化查詢
 
-詳見 [性能改進計畫 V2](docs/roadmap/PERFORMANCE_IMPROVEMENT_PLAN_V2.md)
+壓力測試結果：
+- **250,000 訂單 / 500 用戶** - 25 秒完成
+- **吞吐量** - ~10,000 orders/sec
+- **資料隔離** - 100% 驗證通過
+
+詳見 [性能優化計畫](docs/architecture/MULTI_USER_PERFORMANCE_OPTIMIZATION.md)
 
 ## 🤝 貢獻指南
 

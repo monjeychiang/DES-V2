@@ -35,12 +35,12 @@ func checkPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-func generateToken(userID, secret string) (string, error) {
+func generateToken(userID, secret string, expiresAt time.Time) (string, error) {
 	claims := UserClaims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(72 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
@@ -108,6 +108,7 @@ func CurrentUserID(c *gin.Context) string {
 // registerUser handles user registration.
 func (s *Server) registerUser(c *gin.Context) {
 	var req struct {
+		Username string `json:"username"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
@@ -119,6 +120,7 @@ func (s *Server) registerUser(c *gin.Context) {
 		return
 	}
 	req.Email = strings.TrimSpace(req.Email)
+	req.Username = strings.TrimSpace(req.Username)
 	if req.Email == "" || req.Password == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":  "MISSING_CREDENTIALS",
@@ -177,21 +179,9 @@ func (s *Server) registerUser(c *gin.Context) {
 		return
 	}
 
-	token, err := generateToken(user.ID, s.JWTSecret)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":  "INTERNAL_ERROR",
-			"error": "failed to generate token",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token": token,
-		"user": gin.H{
-			"id":    user.ID,
-			"email": user.Email,
-		},
+	c.JSON(http.StatusCreated, gin.H{
+		"user_id":  user.ID,
+		"username": req.Username,
 	})
 }
 
@@ -242,7 +232,8 @@ func (s *Server) loginUser(c *gin.Context) {
 		return
 	}
 
-	token, err := generateToken(user.ID, s.JWTSecret)
+	expiresAt := time.Now().Add(72 * time.Hour)
+	token, err := generateToken(user.ID, s.JWTSecret, expiresAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":  "INTERNAL_ERROR",
@@ -252,10 +243,9 @@ func (s *Server) loginUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"token": token,
-		"user": gin.H{
-			"id":    user.ID,
-			"email": user.Email,
-		},
+		"token":       token,
+		"expires_at":  expiresAt.UTC().Format(time.RFC3339),
+		"user_id":     user.ID,
+		"user_email":  user.Email,
 	})
 }

@@ -59,7 +59,7 @@ func (m *Manager) Positions() []db.Position {
 
 // RecordFill adjusts position in-memory and persists it.
 // This is a simplified PnL model; extend as needed when real fills are available.
-func (m *Manager) RecordFill(ctx context.Context, symbol, side string, qty, price float64) (db.Position, error) {
+func (m *Manager) RecordFill(ctx context.Context, userID, symbol, side string, qty, price float64) (db.Position, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -130,9 +130,16 @@ func (m *Manager) RecordFill(ctx context.Context, symbol, side string, qty, pric
 	p.Symbol = symbol
 	p.Qty = newQty
 	p.AvgPrice = newAvg
+	p.UserID = userID
 
 	if m.db != nil {
+		// Legacy global positions table (backwards compatibility)
 		_ = m.db.UpsertPosition(ctx, p)
+
+		// Per-user positions table for multi-user isolation
+		if userID != "" {
+			_ = m.db.Queries().UpsertPositionWithUser(ctx, userID, symbol, newQty, newAvg)
+		}
 	}
 	m.positions[symbol] = p
 	return p, nil

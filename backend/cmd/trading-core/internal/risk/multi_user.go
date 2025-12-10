@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"sync"
+	"time"
 )
 
 // MultiUserManager manages risk managers for multiple users.
 type MultiUserManager struct {
 	mu       sync.RWMutex
 	managers map[string]*Manager // userID -> Manager
+	lastSeen map[string]time.Time
 	db       *sql.DB
 }
 
@@ -18,24 +20,19 @@ type MultiUserManager struct {
 func NewMultiUserManager(db *sql.DB) *MultiUserManager {
 	return &MultiUserManager{
 		managers: make(map[string]*Manager),
+		lastSeen: make(map[string]time.Time),
 		db:       db,
 	}
 }
 
 // GetOrCreate returns the risk manager for a user, creating if needed.
 func (m *MultiUserManager) GetOrCreate(userID string) (*Manager, error) {
-	m.mu.RLock()
-	if mgr, ok := m.managers[userID]; ok {
-		m.mu.RUnlock()
-		return mgr, nil
-	}
-	m.mu.RUnlock()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Double-check
 	if mgr, ok := m.managers[userID]; ok {
+		m.lastSeen[userID] = time.Now()
 		return mgr, nil
 	}
 
@@ -44,6 +41,7 @@ func (m *MultiUserManager) GetOrCreate(userID string) (*Manager, error) {
 	// TODO: load per-user config from DB
 	mgr := NewInMemory(DefaultConfig())
 	m.managers[userID] = mgr
+	m.lastSeen[userID] = time.Now()
 	return mgr, nil
 }
 
@@ -59,6 +57,7 @@ func (m *MultiUserManager) Remove(userID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.managers, userID)
+	delete(m.lastSeen, userID)
 }
 
 // GetAllMetrics returns risk metrics for all users.
@@ -96,6 +95,23 @@ func (m *MultiUserManager) ResetDailyForAll() {
 
 	for _, mgr := range m.managers {
 		mgr.ResetDailyMetrics()
+	}
+}
+
+// CleanupIdle removes user managers that have been idle longer than ttl.
+func (m *MultiUserManager) CleanupIdle(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-ttl)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for userID, t := range m.lastSeen {
+		if t.Before(cutoff) {
+			delete(m.managers, userID)
+			delete(m.lastSeen, userID)
+		}
 	}
 }
 

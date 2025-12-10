@@ -137,13 +137,14 @@ func (d *Database) UpdateOrderFill(ctx context.Context, id, status string, fille
 // UpsertPosition stores the latest position for a symbol.
 func (d *Database) UpsertPosition(ctx context.Context, p Position) error {
 	_, err := d.DB.ExecContext(ctx, `
-		INSERT INTO positions (symbol, qty, avg_price, updated_at)
-		VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+		INSERT INTO positions (symbol, qty, avg_price, user_id, updated_at)
+		VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
 		ON CONFLICT(symbol) DO UPDATE SET
 			qty = excluded.qty,
 			avg_price = excluded.avg_price,
+			user_id = excluded.user_id,
 			updated_at = COALESCE(excluded.updated_at, CURRENT_TIMESTAMP)
-	`, p.Symbol, p.Qty, p.AvgPrice, p.UpdatedAt)
+	`, p.Symbol, p.Qty, p.AvgPrice, p.UserID, p.UpdatedAt)
 	return err
 }
 
@@ -337,10 +338,16 @@ func (d *Database) ListConnectionsByUser(ctx context.Context, userID string) ([]
 
 // DeactivateConnection marks a connection as inactive for a user.
 func (d *Database) DeactivateConnection(ctx context.Context, id, userID string) error {
-	_, err := d.DB.ExecContext(ctx, `
+	res, err := d.DB.ExecContext(ctx, `
 		UPDATE connections
 		SET is_active = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND user_id = ?
 	`, id, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rerr := res.RowsAffected(); rerr == nil && rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

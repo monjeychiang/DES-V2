@@ -4,12 +4,14 @@ package balance
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // MultiUserManager manages balances for multiple users.
 type MultiUserManager struct {
 	mu       sync.RWMutex
 	managers map[string]*Manager // userID -> Manager
+	lastSeen map[string]time.Time
 	factory  ManagerFactory
 }
 
@@ -20,24 +22,19 @@ type ManagerFactory func(userID string) (*Manager, error)
 func NewMultiUserManager(factory ManagerFactory) *MultiUserManager {
 	return &MultiUserManager{
 		managers: make(map[string]*Manager),
+		lastSeen: make(map[string]time.Time),
 		factory:  factory,
 	}
 }
 
 // GetOrCreate returns the balance manager for a user, creating if needed.
 func (m *MultiUserManager) GetOrCreate(userID string) (*Manager, error) {
-	m.mu.RLock()
-	if mgr, ok := m.managers[userID]; ok {
-		m.mu.RUnlock()
-		return mgr, nil
-	}
-	m.mu.RUnlock()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Double-check
 	if mgr, ok := m.managers[userID]; ok {
+		m.lastSeen[userID] = time.Now()
 		return mgr, nil
 	}
 
@@ -48,6 +45,7 @@ func (m *MultiUserManager) GetOrCreate(userID string) (*Manager, error) {
 	}
 
 	m.managers[userID] = mgr
+	m.lastSeen[userID] = time.Now()
 	return mgr, nil
 }
 
@@ -63,6 +61,7 @@ func (m *MultiUserManager) Remove(userID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.managers, userID)
+	delete(m.lastSeen, userID)
 }
 
 // StartAll starts all user managers.
@@ -92,4 +91,21 @@ func (m *MultiUserManager) UserCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.managers)
+}
+
+// CleanupIdle removes user managers that have been idle longer than ttl.
+func (m *MultiUserManager) CleanupIdle(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-ttl)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for userID, t := range m.lastSeen {
+		if t.Before(cutoff) {
+			delete(m.managers, userID)
+			delete(m.lastSeen, userID)
+		}
+	}
 }

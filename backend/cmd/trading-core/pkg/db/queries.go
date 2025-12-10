@@ -35,8 +35,8 @@ func (q *UserQueries) GetPositionsByUser(ctx context.Context, userID string) ([]
 
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT symbol, qty, avg_price, COALESCE(user_id, ''), updated_at
-		FROM positions
-		WHERE user_id = ? OR user_id IS NULL OR user_id = ''
+		FROM user_positions
+		WHERE user_id = ?
 	`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("query positions: %w", err)
@@ -61,9 +61,9 @@ func (q *UserQueries) UpsertPositionWithUser(ctx context.Context, userID, symbol
 	}
 
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO positions (symbol, qty, avg_price, user_id, updated_at)
+		INSERT INTO user_positions (symbol, qty, avg_price, user_id, updated_at)
 		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(symbol) DO UPDATE SET
+		ON CONFLICT(symbol, user_id) DO UPDATE SET
 			qty = excluded.qty,
 			avg_price = excluded.avg_price,
 			user_id = excluded.user_id,
@@ -87,7 +87,7 @@ func (q *UserQueries) GetOrdersByUser(ctx context.Context, userID string, limit 
 		SELECT id, COALESCE(strategy_instance_id, ''), symbol, side, price, qty, 
 		       COALESCE(filled_qty, 0), status, COALESCE(user_id, ''), created_at
 		FROM orders
-		WHERE user_id = ? OR user_id IS NULL OR user_id = ''
+		WHERE user_id = ?
 		ORDER BY created_at DESC
 		LIMIT ?
 	`, userID, limit)
@@ -117,7 +117,7 @@ func (q *UserQueries) GetOpenOrdersByUser(ctx context.Context, userID string) ([
 		SELECT id, COALESCE(strategy_instance_id, ''), symbol, side, price, qty, 
 		       COALESCE(filled_qty, 0), status, COALESCE(user_id, ''), created_at
 		FROM orders
-		WHERE (user_id = ? OR user_id IS NULL OR user_id = '') 
+		WHERE user_id = ? 
 		  AND status IN ('NEW', 'PARTIALLY_FILLED')
 		ORDER BY created_at DESC
 	`, userID)
@@ -164,7 +164,7 @@ func (q *UserQueries) GetTradesByUser(ctx context.Context, userID string, limit 
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT id, order_id, symbol, side, price, qty, COALESCE(fee, 0), COALESCE(user_id, ''), created_at
 		FROM trades
-		WHERE user_id = ? OR user_id IS NULL OR user_id = ''
+		WHERE user_id = ?
 		ORDER BY created_at DESC
 		LIMIT ?
 	`, userID, limit)
@@ -269,8 +269,13 @@ func (q *UserQueries) CreateConnectionEncrypted(ctx context.Context, c Connectio
 	}
 
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO connections (id, user_id, exchange_type, name, api_key_encrypted, api_secret_encrypted, key_version, is_active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO connections (
+			id, user_id, exchange_type, name,
+			api_key, api_secret,
+			api_key_encrypted, api_secret_encrypted,
+			key_version, is_active, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, '', '', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 	`, c.ID, c.UserID, c.ExchangeType, c.Name, c.APIKeyEncrypted, c.APISecretEncrypted, c.KeyVersion)
 
 	return err

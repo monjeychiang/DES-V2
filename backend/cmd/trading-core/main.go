@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
@@ -163,7 +164,6 @@ func main() {
 
 	// Multi-user: per-user risk manager
 	multiUserRisk := risk.NewMultiUserManager(database.DB)
-	_ = multiUserRisk // TODO: integrate into API handlers
 
 	// Exchange gateway selection (fallback for single-user mode)
 	var exchGateway exchange.Gateway
@@ -196,12 +196,11 @@ func main() {
 		})
 	}
 
-	// Balance manager with exchange integration
+	// Balance manager with exchange integration (global account)
 	var balanceMgr *balance.Manager
 	if cfg.DryRun {
 		// Dry-run mode: no exchange client needed
 		balanceMgr = balance.NewManager(nil, 30*time.Second)
-		balanceMgr.SetInitialBalance(cfg.DryRunInitialBalance)
 		balanceMgr.SetInitialBalance(cfg.DryRunInitialBalance)
 		log.Printf(i18n.Get("BalanceInitialized"), cfg.DryRunInitialBalance)
 	} else {
@@ -211,12 +210,46 @@ func main() {
 			balanceMgr.Start(ctx)
 			log.Println(i18n.Get("BalanceManagerStarted"))
 		} else {
-			// Fallback: no balance API support
+			// Fallback: no balance API support (simulate with fixed initial balance)
 			balanceMgr = balance.NewManager(nil, 30*time.Second)
 			balanceMgr.SetInitialBalance(10000.0)
 			log.Println(i18n.Get("BalanceManagerFallback"))
 		}
 	}
+
+	// Multi-user balance manager: per-user in-memory balances (primarily for risk control).
+	userBalanceMgr := balance.NewMultiUserManager(func(userID string) (*balance.Manager, error) {
+		mgr := balance.NewManager(nil, 30*time.Second)
+		initial := cfg.DryRunInitialBalance
+		if initial <= 0 {
+			initial = 10000.0
+		}
+		mgr.SetInitialBalance(initial)
+		log.Printf("Multi-user balance manager created for user %s with initial balance %.2f", userID, initial)
+		return mgr, nil
+	})
+
+	// Background cleanup for per-user managers to avoid unbounded growth.
+	perUserIdleTTL := 60 * time.Minute
+	cleanupInterval := 10 * time.Minute
+	go func() {
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if multiUserRisk != nil {
+					multiUserRisk.CleanupIdle(perUserIdleTTL)
+				}
+				if userBalanceMgr != nil {
+					userBalanceMgr.CleanupIdle(perUserIdleTTL)
+				}
+			}
+		}
+	}()
 
 	// Order flow with dry-run wrapper
 	var orderQueue order.OrderQueue
@@ -244,15 +277,46 @@ func main() {
 	dryRunner := order.NewDryRunExecutor(mode, exec, cfg.DryRunInitialBalance)
 	asyncExec := order.NewAsyncExecutorWithDryRun(dryRunner, 4) // V2 P0-B: Async Execution
 
-	// Multi-user: inject KeyManager for API key decryption
+	// Multi-user: inject KeyManager and Gateway pool
 	if keyMgr != nil {
 		exec.SetKeyManager(keyMgr)
+		if gatewayMgr != nil {
+			exec.SetGatewayPool(gatewayMgr)
+		}
 		log.Println("🔐 KeyManager injected into Executor")
 	}
 
 	// System metrics for monitoring
 	sysMetrics := monitor.NewSystemMetrics()
 	log.Println(i18n.Get("SystemMetricsInit"))
+
+	// Periodically update metrics with gateway pool & multi-user stats.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if gatewayMgr != nil {
+					sysMetrics.SetGatewayPoolStats(gatewayMgr.Stats())
+				}
+				if multiUserRisk != nil || userBalanceMgr != nil {
+					riskUsers := 0
+					balanceUsers := 0
+					if multiUserRisk != nil {
+						riskUsers = multiUserRisk.UserCount()
+					}
+					if userBalanceMgr != nil {
+						balanceUsers = userBalanceMgr.UserCount()
+					}
+					sysMetrics.SetMultiUserCounts(riskUsers, balanceUsers)
+				}
+			}
+		}
+	}()
 
 	// Reconciliation service (only in production mode)
 	if !cfg.DryRun {
@@ -349,21 +413,23 @@ func main() {
 	// Filled orders -> update positions and risk metrics (price fallback to latest cache)
 	go func() {
 		for msg := range filledSub {
-			var (
-				symbol string
-				side   string
-				qty    float64
-				price  float64
-			)
-			switch v := msg.(type) {
-			case order.Order:
-				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
-			case struct {
-				ID     string
-				Symbol string
-				Side   string
-				Qty    float64
-				Price  float64
+  			var (
+  				symbol string
+  				side   string
+  				qty    float64
+  				price  float64
+  				userID string
+  			)
+ 			switch v := msg.(type) {
+ 			case order.Order:
+  				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
+  				userID = v.UserID
+ 			case struct {
+ 				ID     string
+ 				Symbol string
+ 				Side   string
+ 				Qty    float64
+ 				Price  float64
 			}:
 				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
 			default:
@@ -383,11 +449,11 @@ func main() {
 				log.Printf(i18n.Get("FillPriceZeroFallback"), symbol)
 			}
 
-			// Snapshot previous position for realized PnL
-			prev := stateMgr.Position(symbol)
-
-			// Update in-memory + DB position
-			_, _ = stateMgr.RecordFill(ctx, symbol, side, qty, fillPrice)
+ 			// Snapshot previous position for realized PnL
+ 			prev := stateMgr.Position(symbol)
+ 
+ 			// Update in-memory + DB position
+			_, _ = stateMgr.RecordFill(ctx, userID, symbol, side, qty, fillPrice)
 
 			// Get updated position for cleanup check
 			newPos := stateMgr.Position(symbol)
@@ -439,15 +505,23 @@ func main() {
 				log.Printf(i18n.Get("RiskMetricsUpdateFailed"), err)
 			}
 
-			// Handle balance updates based on trade side
-			orderValue := qty * fillPrice
-			if strings.ToUpper(side) == "BUY" {
-				// Buy order - deduct locked balance
-				balanceMgr.Deduct(orderValue)
-			} else if strings.ToUpper(side) == "SELL" {
-				// Sell order - add proceeds (unlock was already done if partial fill)
-				balanceMgr.Add(orderValue)
-			}
+  			// Handle balance updates based on trade side (per-user when possible)
+  			orderValue := qty * fillPrice
+  			balTarget := balanceMgr
+  			if userID != "" && userBalanceMgr != nil {
+  				if userBalMgr, err := userBalanceMgr.GetOrCreate(userID); err == nil {
+  					balTarget = userBalMgr
+  				} else {
+  					log.Printf("per-user balance manager init failed for user %s (fill): %v - using global balance", userID, err)
+  				}
+  			}
+  			if strings.ToUpper(side) == "BUY" {
+  				// Buy order - deduct locked balance
+  				balTarget.Deduct(orderValue)
+  			} else if strings.ToUpper(side) == "SELL" {
+  				// Sell order - add proceeds (unlock was already done if partial fill)
+  				balTarget.Add(orderValue)
+  			}
 
 			// Clean up stop loss tracking if position is closed
 			if math.Abs(newPos.Qty) < 0.0001 {
@@ -515,11 +589,34 @@ func main() {
 					}
 				}()
 
-				sig, ok := msg.(strategy.Signal)
-				if !ok {
-					return
-				}
+ 				sig, ok := msg.(strategy.Signal)
+ 				if !ok {
+ 					return
+ 				}
 
+				// Resolve strategy owner and bound connection (if any)
+				var (
+					stratUserID     sql.NullString
+					stratConnID     sql.NullString
+					stratExchangeTy sql.NullString
+				)
+				if err := database.DB.QueryRowContext(ctx, `
+					SELECT si.user_id, si.connection_id, c.exchange_type
+					FROM strategy_instances si
+					LEFT JOIN connections c ON si.connection_id = c.id
+					WHERE si.id = ?
+				`, sig.StrategyID).Scan(&stratUserID, &stratConnID, &stratExchangeTy); err != nil && err != sql.ErrNoRows {
+					log.Printf("strategy owner lookup failed for %s: %v", sig.StrategyID, err)
+				}
+				userID := ""
+				if stratUserID.Valid {
+					userID = stratUserID.String
+				}
+				connectionID := ""
+				if stratConnID.Valid {
+					connectionID = stratConnID.String
+				}
+ 
 				// Gather context for risk decision
 				price := priceCache.get(sig.Symbol)
 				pos := stateMgr.Position(sig.Symbol)
@@ -532,8 +629,17 @@ func main() {
 					Value:         pos.Qty * price,
 					UnrealizedPnL: (price - pos.AvgPrice) * pos.Qty,
 				}
-				// Build account snapshot for risk evaluation
-				balSnap := balanceMgr.GetBalance()
+				// Build account snapshot for risk evaluation (per-user when possible)
+				balSource := balanceMgr
+				if userID != "" && userBalanceMgr != nil {
+					if userBalMgr, err := userBalanceMgr.GetOrCreate(userID); err == nil {
+						balSource = userBalMgr
+					} else {
+						log.Printf("per-user balance manager init failed for user %s: %v - using global balance", userID, err)
+					}
+				}
+
+				balSnap := balSource.GetBalance()
 				totalExposure := expCache.get(func() float64 {
 					sum := 0.0
 					for _, p := range stateMgr.Positions() {
@@ -546,21 +652,29 @@ func main() {
 					Balance:          balSnap.Total,
 					AvailableBalance: balSnap.Available,
 					LockedBalance:    balSnap.Locked,
-					TotalExposure:    totalExposure,
+ 					TotalExposure:    totalExposure,
+ 				}
+ 
+				// I2: Single entry point for all risk checks (per-user when possible)
+				signalInput := risk.SignalInput{
+					Symbol: sig.Symbol,
+					Action: sig.Action,
+					Size:   sig.Size,
+					Price:  price,
 				}
 
-				// I2: Single entry point for all risk checks
-				decision := riskMgr.EvaluateFull(
-					risk.SignalInput{
-						Symbol: sig.Symbol,
-						Action: sig.Action,
-						Size:   sig.Size,
-						Price:  price,
-					},
-					position,
-					account,
-					sig.StrategyID,
-				)
+				var decision risk.RiskDecision
+				if userID != "" && multiUserRisk != nil {
+					dec, err := multiUserRisk.EvaluateForUser(userID, signalInput, position, account, sig.StrategyID)
+					if err != nil {
+						log.Printf("per-user risk eval failed for user %s: %v - falling back to global", userID, err)
+						decision = riskMgr.EvaluateFull(signalInput, position, account, sig.StrategyID)
+					} else {
+						decision = dec
+					}
+				} else {
+					decision = riskMgr.EvaluateFull(signalInput, position, account, sig.StrategyID)
+				}
 				if !decision.Allowed {
 					log.Printf(i18n.Get("RiskRejected"), decision.Reason)
 					bus.Publish(events.EventRiskAlert, decision.Reason)
@@ -576,9 +690,9 @@ func main() {
 					size = sig.Size
 				}
 
-				// I3: Lock balance AFTER evaluation, with final adjusted size
+				// I3: Lock balance AFTER evaluation, with final adjusted size (per-user when possible)
 				finalOrderValue := size * price
-				if err := balanceMgr.Lock(finalOrderValue); err != nil {
+				if err := balSource.Lock(finalOrderValue); err != nil {
 					log.Printf(i18n.Get("BalanceLockFailed"), err)
 					bus.Publish(events.EventRiskAlert, fmt.Sprintf("Insufficient balance: %v", err))
 					return
@@ -599,6 +713,11 @@ func main() {
 				})
 
 				// Create order with locked balance
+				orderMarket := marketFromVenue(venue)
+				if stratExchangeTy.Valid {
+					orderMarket = marketFromVenue(stratExchangeTy.String)
+				}
+
 				o := order.Order{
 					ID:                 uuid.NewString(),
 					StrategyInstanceID: sig.StrategyID,
@@ -608,9 +727,11 @@ func main() {
 					Qty:                size,
 					Status:             "NEW",
 					CreatedAt:          time.Now(),
-					Market:             marketFromVenue(venue),
+					Market:             orderMarket,
 					StopPrice:          decision.StopLoss,
 					ActivationPrice:    decision.TakeProfit,
+					UserID:             userID,
+					ConnectionID:       connectionID,
 				}
 				orderQueue.Enqueue(o)
 			}() // End of panic recovery wrapper
@@ -683,6 +804,7 @@ func main() {
 			UseMockFeed: cfg.UseMockFeed,
 			Version:     buildVersion,
 		},
+		MultiUserRiskMgr: multiUserRisk,
 	})
 	log.Println(i18n.Get("EngineServiceInit"))
 
@@ -701,6 +823,8 @@ func main() {
 			Version:     buildVersion,
 		},
 		cfg.JWTSecret,
+		keyMgr,
+		userBalanceMgr,
 	)
 	go func() {
 		if err := server.Start(":" + cfg.Port); err != nil {

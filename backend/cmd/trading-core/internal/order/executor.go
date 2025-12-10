@@ -23,6 +23,11 @@ type KeyManager interface {
 	Decrypt(ciphertext string) (string, error)
 }
 
+// GatewayPool provides per-connection gateways (typically backed by gateway.Manager).
+type GatewayPool interface {
+	GetOrCreate(ctx context.Context, userID, connectionID string) (exchange.Gateway, error)
+}
+
 // Executor persists orders, sends them to an exchange gateway, and emits updates.
 type Executor struct {
 	DB      *db.Database
@@ -35,6 +40,9 @@ type Executor struct {
 
 	// Multi-user: KeyManager for decrypting API keys (optional)
 	KeyManager KeyManager
+
+	// Optional per-connection gateway pool (multi-user mode)
+	Pool GatewayPool
 
 	mu           sync.RWMutex
 	connGateways map[string]exchange.Gateway // connection_id -> gateway
@@ -54,6 +62,11 @@ func NewExecutor(database *db.Database, bus *events.Bus, gw exchange.Gateway, ve
 // SetKeyManager sets the KeyManager for API key decryption.
 func (e *Executor) SetKeyManager(km KeyManager) {
 	e.KeyManager = km
+}
+
+// SetGatewayPool configures the per-connection gateway pool.
+func (e *Executor) SetGatewayPool(pool GatewayPool) {
+	e.Pool = pool
 }
 
 func (e *Executor) Handle(ctx context.Context, o Order) error {
@@ -137,6 +150,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 		Price:              o.Price,
 		Qty:                o.Qty,
 		Status:             status,
+		UserID:             o.UserID,
 		CreatedAt:          time.Now(),
 	}
 	if err := e.DB.CreateOrder(ctx, model); err != nil {
@@ -154,6 +168,7 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 			Price:     model.Price,
 			Qty:       model.Qty,
 			Fee:       0,
+			UserID:    o.UserID,
 			CreatedAt: time.Now(),
 		}
 		if err := e.DB.CreateTrade(ctx, trade); err != nil {
@@ -213,6 +228,16 @@ func (e *Executor) gatewayForOrder(ctx context.Context, o Order) (exchange.Gatew
 
 // gatewayForConnection returns a gateway for a specific connection, with user validation.
 func (e *Executor) gatewayForConnection(ctx context.Context, userID, connID string) (exchange.Gateway, string, bool) {
+	// Prefer external gateway pool when configured (multi-user mode).
+	if e.Pool != nil {
+		gw, err := e.Pool.GetOrCreate(ctx, userID, connID)
+		if err != nil {
+			log.Printf("executor: gateway pool error for connection %s (user %s): %v", connID, userID, err)
+			return nil, "", false
+		}
+		return gw, "", true
+	}
+
 	if e.DB == nil {
 		return nil, "", false
 	}
@@ -283,41 +308,41 @@ func (e *Executor) gatewayForStrategy(ctx context.Context, strategyID string) (e
 		return nil, "", false
 	}
 
-	// Lookup bound connection for this strategy.
+	// Lookup owning user and bound connection for this strategy.
+	// We intentionally require a non-empty user_id so that we can
+	// go through the same per-user connection validation and
+	// gateway pool as manual orders.
 	row := e.DB.DB.QueryRowContext(ctx, `
-		SELECT c.id, c.exchange_type, c.api_key, c.api_secret
+		SELECT 
+			COALESCE(si.user_id, '')  AS user_id,
+			COALESCE(si.connection_id, '') AS connection_id,
+			COALESCE(c.exchange_type, '') AS exchange_type
 		FROM strategy_instances si
-		JOIN connections c ON si.connection_id = c.id
-		WHERE si.id = ? AND c.is_active = 1
+		LEFT JOIN connections c ON si.connection_id = c.id AND c.is_active = 1
+		WHERE si.id = ?
 	`, strategyID)
 
-	var connID, exchangeType, apiKey, apiSecret string
-	if err := row.Scan(&connID, &exchangeType, &apiKey, &apiSecret); err != nil {
+	var userID, connID, exchangeType string
+	if err := row.Scan(&userID, &connID, &exchangeType); err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("executor: failed to resolve connection for strategy %s: %v", strategyID, err)
 		}
 		return nil, "", false
 	}
 
-	// Reuse cached gateway if available.
-	e.mu.RLock()
-	gw, ok := e.connGateways[connID]
-	e.mu.RUnlock()
-	if ok && gw != nil {
-		return gw, exchangeType, true
-	}
-
-	// Create a new gateway for this connection using shared helper.
-	newGw := e.createGateway(exchangeType, apiKey, apiSecret)
-	if newGw == nil {
+	if userID == "" || connID == "" {
+		log.Printf("executor: strategy %s missing user_id or connection_id (user=%q, conn=%q)", strategyID, userID, connID)
 		return nil, "", false
 	}
 
-	e.mu.Lock()
-	e.connGateways[connID] = newGw
-	e.mu.Unlock()
+	// Reuse the same per-user connection gateway resolution path as manual orders.
+	gw, _, ok := e.gatewayForConnection(ctx, userID, connID)
+	if !ok || gw == nil {
+		log.Printf("executor: no gateway for strategy %s (user=%s, connection=%s)", strategyID, userID, connID)
+		return nil, "", false
+	}
 
-	return newGw, exchangeType, true
+	return gw, exchangeType, true
 }
 
 // createGateway creates an exchange.Gateway based on exchange type.
@@ -387,7 +412,7 @@ func (e *Executor) checkProfitTarget(ctx context.Context, strategyID string) {
 	}
 
 	// 4. Profit target reached - stop the strategy
-	log.Printf("🎯 Profit target reached for strategy %s: %.2f %s (target: %.2f)",
+	log.Printf("dYZ_ Profit target reached for strategy %s: %.2f %s (target: %.2f)",
 		strategyID, realizedPnL, profitTargetType, profitTarget)
 
 	// Update strategy status to STOPPED

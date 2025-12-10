@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS positions (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS user_positions (
+    symbol TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    qty REAL NOT NULL,
+    avg_price REAL NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -247,6 +256,7 @@ func ApplyMigrations(d *Database) error {
 	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_orders_user_time ON orders(user_id, created_at)")
 	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_trades_user_time ON trades(user_id, created_at)")
 	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id)")
+	d.DB.Exec("CREATE INDEX IF NOT EXISTS idx_user_positions_user ON user_positions(user_id, symbol)")
 
 	return nil
 }

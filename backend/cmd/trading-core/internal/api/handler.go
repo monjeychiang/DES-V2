@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"trading-core/internal/balance"
 	"trading-core/internal/engine"
 	"trading-core/internal/events"
 	"trading-core/internal/monitor"
@@ -27,7 +28,8 @@ type Server struct {
 	OrderQueue order.OrderQueue
 
 	// Multi-user: API key encryption manager (optional, nil = plaintext)
-	KeyManager KeyManager
+	KeyManager    KeyManager
+	UserBalances  *balance.MultiUserManager
 
 	JWTSecret string
 	Meta      SystemMeta
@@ -37,6 +39,7 @@ type Server struct {
 type KeyManager interface {
 	Encrypt(plaintext string) (string, error)
 	Decrypt(ciphertext string) (string, error)
+	CurrentVersion() int
 }
 
 // SystemMeta describes runtime status exposed to the UI.
@@ -57,6 +60,8 @@ func NewServer(
 	orderQueue order.OrderQueue,
 	meta SystemMeta,
 	jwtSecret string,
+	keyMgr KeyManager,
+	userBalances *balance.MultiUserManager,
 ) *Server {
 	r := gin.New()
 
@@ -76,6 +81,8 @@ func NewServer(
 		Engine:     eng,
 		Metrics:    metrics,
 		OrderQueue: orderQueue,
+		KeyManager: keyMgr,
+		UserBalances: userBalances,
 		JWTSecret:  jwtSecret,
 		Meta:       meta,
 	}
@@ -87,7 +94,7 @@ func (s *Server) routes() {
 	s.Router.GET("/health", s.health)
 	s.Router.GET("/ws", s.websocket)
 
-	api := s.Router.Group("/api")
+	api := s.Router.Group("/api/v1")
 	{
 		api.GET("/system/status", s.getSystemStatus)
 		api.GET("/metrics", s.getMetrics)
@@ -110,6 +117,12 @@ func (s *Server) routes() {
 			protected.GET("/balance", s.getBalance)
 			protected.GET("/risk", s.getRiskMetrics)
 			protected.GET("/strategies/:id/performance", s.getStrategyPerformance)
+
+			// Strategy management (create + bind)
+			protected.POST("/strategies", s.createStrategy)
+
+			// Manual orders (per-user, per-connection)
+			protected.POST("/orders", s.createOrder)
 
 			// Strategy Actions
 			protected.POST("/strategies/:id/start", s.startStrategy)

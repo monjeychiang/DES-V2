@@ -54,7 +54,7 @@ DB_PATH=./data/trading.db
 ### 2.1 註冊新用戶
 
 ```http
-POST /api/auth/register
+POST /api/v1/auth/register
 Content-Type: application/json
 
 {
@@ -75,7 +75,7 @@ Content-Type: application/json
 ### 2.2 用戶登入
 
 ```http
-POST /api/auth/login
+POST /api/v1/auth/login
 Content-Type: application/json
 
 {
@@ -107,7 +107,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 ### 3.1 新增交易所連線（API Key 自動加密）
 
 ```http
-POST /api/connections
+POST /api/v1/connections
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -136,7 +136,7 @@ Content-Type: application/json
 ### 3.2 查看我的連線列表
 
 ```http
-GET /api/connections
+GET /api/v1/connections
 Authorization: Bearer {token}
 ```
 
@@ -161,7 +161,7 @@ Authorization: Bearer {token}
 ### 3.3 停用連線
 
 ```http
-DELETE /api/connections/conn_xyz789
+DELETE /api/v1/connections/conn_xyz789
 Authorization: Bearer {token}
 ```
 
@@ -172,7 +172,7 @@ Authorization: Bearer {token}
 ### 4.1 創建策略並綁定連線
 
 ```http
-POST /api/strategies
+POST /api/v1/strategies
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -193,7 +193,7 @@ Content-Type: application/json
 ### 4.2 手動下單（指定連線）
 
 ```http
-POST /api/orders
+POST /api/v1/orders
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -242,7 +242,7 @@ Content-Type: application/json
 ### 4.3 查詢我的訂單
 
 ```http
-GET /api/orders
+GET /api/v1/orders
 Authorization: Bearer {token}
 ```
 
@@ -264,9 +264,20 @@ Authorization: Bearer {token}
 ### 4.4 查詢我的持倉
 
 ```http
-GET /api/positions
+GET /api/v1/positions
 Authorization: Bearer {token}
 ```
+
+### 4.5 查詢我的餘額
+
+```http
+GET /api/v1/balance
+Authorization: Bearer {token}
+```
+
+**說明：**
+- 回傳的 `available/locked/total` 為當前登入用戶的餘額快照。
+- 在多用戶模式下，每個用戶有獨立的餘額管理實例，互不影響。
 
 ---
 
@@ -281,6 +292,7 @@ Authorization: Bearer {token}
 | 交易 (Trades) | `user_id` 強制欄位 |
 | 持倉 (Positions) | `user_id` 強制欄位 |
 | 策略 (Strategies) | `user_id` 綁定 |
+| 餘額 (Balance) | 每用戶獨立 Balance Manager 實例 |
 | 風控 (Risk) | 每用戶獨立 Manager 實例 |
 
 ### 5.2 安全保證
@@ -288,7 +300,8 @@ Authorization: Bearer {token}
 1. **資料庫層**：所有查詢強制包含 `WHERE user_id = ?`
 2. **API 層**：Handler 從 JWT 提取 userID，無法偽造
 3. **Gateway 層**：連線緩存按 `connection_id` 隔離
-4. **風控層**：每用戶獨立的 `risk.Manager` 實例
+4. **Balance 層**：每用戶獨立的餘額管理實例
+5. **風控層**：每用戶獨立的 `risk.Manager` 實例
 
 ### 5.3 錯誤場景處理
 
@@ -348,17 +361,17 @@ echo "MASTER_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
 go run main.go
 
 # 3. 註冊用戶
-curl -X POST http://localhost:8080/api/auth/register \
+curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"username":"demo","email":"demo@example.com","password":"Demo123!"}'
 
 # 4. 登入取得 token
-TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"demo@example.com","password":"Demo123!"}' | jq -r '.token')
 
 # 5. 新增交易所連線
-curl -X POST http://localhost:8080/api/connections \
+curl -X POST http://localhost:8080/api/v1/connections \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"My Binance","exchange_type":"binance-spot","api_key":"xxx","api_secret":"yyy"}'
