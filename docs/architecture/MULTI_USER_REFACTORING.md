@@ -18,6 +18,8 @@
 | Phase 5 | 餘額/風控隔離 | ✅ 完成 | `balance/multi_user.go`, `risk/multi_user.go` |
 | 整合 | main.go | ✅ 完成 | KeyManager, GatewayManager 初始化 |
 | 整合 | API Handler | ✅ 完成 | controllers.go 使用 UserQueries |
+| 整合 | Executor 路由 | ✅ 完成 | `gatewayForConnection` 支援 ConnectionID |
+| 整合 | Connection 加密 | ✅ 完成 | `createConnection` 使用 KeyManager |
 | 測試 | 單元測試 | ✅ 通過 | `queries_test.go`, `encryption_test.go` |
 
 ---
