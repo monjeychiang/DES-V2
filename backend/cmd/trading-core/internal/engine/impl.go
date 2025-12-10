@@ -24,6 +24,9 @@ type Impl struct {
 	bus         *events.Bus
 	db          *db.Database
 
+	// Multi-user support (optional, for multi-user mode)
+	multiUserRiskMgr *risk.MultiUserManager
+
 	// System metadata
 	meta SystemStatus
 }
@@ -37,18 +40,22 @@ type Config struct {
 	Bus         *events.Bus
 	DB          *db.Database
 	Meta        SystemStatus
+
+	// Multi-user support (optional)
+	MultiUserRiskMgr *risk.MultiUserManager
 }
 
 // NewImpl creates a new engine implementation.
 func NewImpl(cfg Config) *Impl {
 	return &Impl{
-		stratEngine: cfg.StratEngine,
-		riskMgr:     cfg.RiskMgr,
-		balanceMgr:  cfg.BalanceMgr,
-		orderQueue:  cfg.OrderQueue,
-		bus:         cfg.Bus,
-		db:          cfg.DB,
-		meta:        cfg.Meta,
+		stratEngine:      cfg.StratEngine,
+		riskMgr:          cfg.RiskMgr,
+		balanceMgr:       cfg.BalanceMgr,
+		orderQueue:       cfg.OrderQueue,
+		bus:              cfg.Bus,
+		db:               cfg.DB,
+		meta:             cfg.Meta,
+		multiUserRiskMgr: cfg.MultiUserRiskMgr,
 	}
 }
 

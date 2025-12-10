@@ -18,6 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// KeyManager interface for API key decryption.
+type KeyManager interface {
+	Decrypt(ciphertext string) (string, error)
+}
+
 // Executor persists orders, sends them to an exchange gateway, and emits updates.
 type Executor struct {
 	DB      *db.Database
@@ -27,6 +32,9 @@ type Executor struct {
 	Exchange     string // name/id for logging (fallback)
 	Testnet      bool
 	SkipExchange bool // when true, never call external gateways (used by dry-run wrapper)
+
+	// Multi-user: KeyManager for decrypting API keys (optional)
+	KeyManager KeyManager
 
 	mu           sync.RWMutex
 	connGateways map[string]exchange.Gateway // connection_id -> gateway
@@ -41,6 +49,11 @@ func NewExecutor(database *db.Database, bus *events.Bus, gw exchange.Gateway, ve
 		Testnet:      testnet,
 		connGateways: make(map[string]exchange.Gateway),
 	}
+}
+
+// SetKeyManager sets the KeyManager for API key decryption.
+func (e *Executor) SetKeyManager(km KeyManager) {
+	e.KeyManager = km
 }
 
 func (e *Executor) Handle(ctx context.Context, o Order) error {
@@ -233,10 +246,22 @@ func (e *Executor) gatewayForConnection(ctx context.Context, userID, connID stri
 	// Use encrypted keys if available, otherwise fallback to plaintext
 	finalAPIKey := apiKey
 	finalAPISecret := apiSecret
-	if apiKeyEnc != "" {
-		// TODO: Decrypt using KeyManager when available
-		// For now, log warning and fallback
-		log.Printf("executor: connection %s has encrypted keys but decryption not implemented in executor", connID)
+	if apiKeyEnc != "" && e.KeyManager != nil {
+		decryptedKey, err := e.KeyManager.Decrypt(apiKeyEnc)
+		if err != nil {
+			log.Printf("executor: failed to decrypt api_key for connection %s: %v", connID, err)
+			return nil, "", false
+		}
+		decryptedSecret, err := e.KeyManager.Decrypt(apiSecretEnc)
+		if err != nil {
+			log.Printf("executor: failed to decrypt api_secret for connection %s: %v", connID, err)
+			return nil, "", false
+		}
+		finalAPIKey = decryptedKey
+		finalAPISecret = decryptedSecret
+	} else if apiKeyEnc != "" && e.KeyManager == nil {
+		log.Printf("executor: connection %s has encrypted keys but KeyManager not configured", connID)
+		return nil, "", false
 	}
 
 	// Create gateway
