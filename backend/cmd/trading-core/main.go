@@ -18,6 +18,7 @@ import (
 	"trading-core/internal/balance"
 	"trading-core/internal/engine"
 	"trading-core/internal/events"
+	"trading-core/internal/gateway"
 	"trading-core/internal/indicators"
 	"trading-core/internal/market"
 	"trading-core/internal/monitor"
@@ -28,6 +29,7 @@ import (
 	"trading-core/internal/strategy"
 	"trading-core/pkg/binance"
 	"trading-core/pkg/config"
+	"trading-core/pkg/crypto"
 	"trading-core/pkg/db"
 	exfutcoin "trading-core/pkg/exchanges/binance/futures_coin"
 	exfutusdt "trading-core/pkg/exchanges/binance/futures_usdt"
@@ -135,8 +137,36 @@ func main() {
 	priceCache := &priceCache{m: make(map[string]float64)}
 	expCache := &exposureCache{ttl: 1 * time.Second}
 
-	// Exchange gateway selection
-	var gateway exchange.Gateway
+	// Multi-user: Key Manager (for encrypted API keys)
+	var keyMgr *crypto.KeyManager
+	if os.Getenv("MASTER_ENCRYPTION_KEY") != "" {
+		keyMgr, err = crypto.NewKeyManager()
+		if err != nil {
+			log.Printf("⚠️ KeyManager init failed: %v (encryption disabled)", err)
+		} else {
+			log.Printf("🔐 KeyManager initialized (version %d)", keyMgr.CurrentVersion())
+		}
+	}
+
+	// Multi-user: Gateway Manager (per-connection gateways)
+	var gatewayMgr *gateway.Manager
+	if keyMgr != nil {
+		gatewayMgr = gateway.NewManager(
+			database.Queries(),
+			keyMgr,
+			gateway.DefaultFactory,
+			gateway.DefaultConfig(),
+		)
+		gatewayMgr.Start(ctx)
+		log.Println("🌐 GatewayManager started (multi-user mode)")
+	}
+
+	// Multi-user: per-user risk manager
+	multiUserRisk := risk.NewMultiUserManager(database.DB)
+	_ = multiUserRisk // TODO: integrate into API handlers
+
+	// Exchange gateway selection (fallback for single-user mode)
+	var exchGateway exchange.Gateway
 	venue := "none"
 	buildVersion := os.Getenv("APP_VERSION")
 	if buildVersion == "" {
@@ -145,21 +175,21 @@ func main() {
 	switch {
 	case cfg.EnableBinanceTrading:
 		venue = "binance-spot"
-		gateway = exspot.New(exspot.Config{
+		exchGateway = exspot.New(exspot.Config{
 			APIKey:    cfg.BinanceAPIKey,
 			APISecret: cfg.BinanceAPISecret,
 			Testnet:   false,
 		})
 	case cfg.EnableBinanceUSDTFutures:
 		venue = "binance-usdtfut"
-		gateway = exfutusdt.NewClient(exfutusdt.Config{
+		exchGateway = exfutusdt.NewClient(exfutusdt.Config{
 			APIKey:    cfg.BinanceUSDTKey,
 			APISecret: cfg.BinanceUSDTSecret,
 			Testnet:   false,
 		})
 	case cfg.EnableBinanceCoinFutures:
 		venue = "binance-coinfut"
-		gateway = exfutcoin.NewClient(exfutcoin.Config{
+		exchGateway = exfutcoin.NewClient(exfutcoin.Config{
 			APIKey:    cfg.BinanceCoinKey,
 			APISecret: cfg.BinanceCoinSecret,
 			Testnet:   false,
@@ -175,8 +205,8 @@ func main() {
 		balanceMgr.SetInitialBalance(cfg.DryRunInitialBalance)
 		log.Printf(i18n.Get("BalanceInitialized"), cfg.DryRunInitialBalance)
 	} else {
-		// Production mode: Try to use gateway if it implements balance.ExchangeClient
-		if balClient, ok := gateway.(balance.ExchangeClient); ok {
+		// Production mode: Try to use exchGateway if it implements balance.ExchangeClient
+		if balClient, ok := exchGateway.(balance.ExchangeClient); ok {
 			balanceMgr = balance.NewManager(balClient, 30*time.Second)
 			balanceMgr.Start(ctx)
 			log.Println(i18n.Get("BalanceManagerStarted"))
@@ -205,7 +235,7 @@ func main() {
 	} else {
 		orderQueue = order.NewQueue(200)
 	}
-	exec := order.NewExecutor(database, bus, gateway, venue, cfg.BinanceTestnet)
+	exec := order.NewExecutor(database, bus, exchGateway, venue, cfg.BinanceTestnet)
 	mode := order.ModeProduction
 	if cfg.DryRun {
 		mode = order.ModeDryRun
@@ -220,7 +250,7 @@ func main() {
 
 	// Reconciliation service (only in production mode)
 	if !cfg.DryRun {
-		if reconClient, ok := gateway.(reconciliation.ExchangeClient); ok {
+		if reconClient, ok := exchGateway.(reconciliation.ExchangeClient); ok {
 			reconService := reconciliation.NewService(reconClient, stateMgr, database, 5*time.Minute)
 			reconService.Start(ctx)
 			log.Println(i18n.Get("ReconStarted"))
