@@ -25,6 +25,9 @@ type Order struct {
 	CallbackRate    float64 // trailing stop callback %
 	Status          string  // NEW, SUBMITTED, ACCEPTED, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED, EXPIRED
 	CreatedAt       time.Time
+	// Multi-user routing (Phase 4)
+	UserID       string // Owner of this order
+	ConnectionID string // Exchange connection to route to
 }
 
 // IsFullyFilled checks if order is fully filled
