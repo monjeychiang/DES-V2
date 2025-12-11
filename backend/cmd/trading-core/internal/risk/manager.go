@@ -712,8 +712,8 @@ func (m *Manager) UpdateMetrics(trade TradeResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Use net PnL = gross PnL - fee
-	net := trade.PnL - trade.Fee
+	// PnL is already net of fees, so avoid double-subtracting the fee here
+	net := trade.PnL
 
 	m.metrics.DailyTrades++
 	m.metrics.DailyPnL += net
