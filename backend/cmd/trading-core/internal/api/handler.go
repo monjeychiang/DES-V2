@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 	"time"
 
 	"trading-core/internal/balance"
@@ -28,11 +29,23 @@ type Server struct {
 	OrderQueue order.OrderQueue
 
 	// Multi-user: API key encryption manager (optional, nil = plaintext)
-	KeyManager    KeyManager
-	UserBalances  *balance.MultiUserManager
+	KeyManager   KeyManager
+	UserBalances *balance.MultiUserManager
 
 	JWTSecret string
 	Meta      SystemMeta
+}
+
+func normalizeKeyManager(k KeyManager) KeyManager {
+	if k == nil {
+		return noopKeyManager{}
+	}
+	// Handle nil pointer wrapped in interface (e.g., *crypto.KeyManager(nil)).
+	rv := reflect.ValueOf(k)
+	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return noopKeyManager{}
+	}
+	return k
 }
 
 // KeyManager interface for API key encryption.
@@ -41,6 +54,13 @@ type KeyManager interface {
 	Decrypt(ciphertext string) (string, error)
 	CurrentVersion() int
 }
+
+// noopKeyManager is used when no KeyManager is provided (tests/non-secure env).
+type noopKeyManager struct{}
+
+func (noopKeyManager) Encrypt(plaintext string) (string, error)  { return plaintext, nil }
+func (noopKeyManager) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
+func (noopKeyManager) CurrentVersion() int                       { return 1 }
 
 // SystemMeta describes runtime status exposed to the UI.
 type SystemMeta struct {
@@ -66,25 +86,27 @@ func NewServer(
 	r := gin.New()
 
 	// Middleware stack (order matters!)
-	r.Use(gin.Recovery())        // Panic recovery (first)
-	r.Use(RequestIDMiddleware()) // Request ID tracking
-	r.Use(RequestLogger())       // Request logging (after ID is set)
-	r.Use(RateLimitMiddleware()) // Rate limiting
+	r.Use(gin.Recovery())         // Panic recovery (first)
+	r.Use(RequestIDMiddleware())  // Request ID tracking
+	r.Use(RequestLogger(metrics)) // Request logging (after ID is set)
+	r.Use(RateLimitMiddleware())  // Rate limiting
 	// Security headers handled by Nginx
 	r.Use(TimeoutMiddleware(30 * time.Second)) // Request timeout (30s)
 	r.Use(CORSMiddleware())                    // CORS (last before routes)
 
+	keyMgr = normalizeKeyManager(keyMgr)
+
 	s := &Server{
-		Router:     r,
-		Bus:        bus,
-		DB:         database,
-		Engine:     eng,
-		Metrics:    metrics,
-		OrderQueue: orderQueue,
-		KeyManager: keyMgr,
+		Router:       r,
+		Bus:          bus,
+		DB:           database,
+		Engine:       eng,
+		Metrics:      metrics,
+		OrderQueue:   orderQueue,
+		KeyManager:   keyMgr,
 		UserBalances: userBalances,
-		JWTSecret:  jwtSecret,
-		Meta:       meta,
+		JWTSecret:    jwtSecret,
+		Meta:         meta,
 	}
 	s.routes()
 	return s
@@ -93,6 +115,8 @@ func NewServer(
 func (s *Server) routes() {
 	s.Router.GET("/health", s.health)
 	s.Router.GET("/ws", s.websocket)
+	// Prometheus-style metrics (unauthenticated, lightweight)
+	s.Router.GET("/metrics", s.getPromMetrics)
 
 	api := s.Router.Group("/api/v1")
 	{

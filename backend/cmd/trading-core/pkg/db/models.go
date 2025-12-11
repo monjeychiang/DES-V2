@@ -92,6 +92,7 @@ type Connection struct {
 	IsActive           bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	LastRotatedAt      time.Time
 }
 
 // CreateOrder inserts a new order row.
@@ -291,13 +292,15 @@ func (d *Database) CreateConnection(ctx context.Context, c Connection) error {
 		_, err := d.DB.ExecContext(ctx, `
 			INSERT INTO connections (
 				id, user_id, exchange_type, name, 
+				api_key, api_secret,
 				api_key_encrypted, api_secret_encrypted, key_version,
-				is_active, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+				is_active, created_at, updated_at, last_rotated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
 		`,
 			c.ID, c.UserID, c.ExchangeType, c.Name,
+			c.APIKey, c.APISecret,
 			c.APIKeyEncrypted, c.APISecretEncrypted, c.KeyVersion,
-			c.IsActive, c.CreatedAt, c.UpdatedAt,
+			c.IsActive, c.CreatedAt, c.UpdatedAt, c.LastRotatedAt,
 		)
 		return err
 	}

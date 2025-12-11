@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"trading-core/internal/monitor"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
@@ -144,8 +146,8 @@ func TimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 	}
 }
 
-// RequestLogger logs all API requests with timing and status
-func RequestLogger() gin.HandlerFunc {
+// RequestLogger logs all API requests with timing and status; optionally records metrics.
+func RequestLogger(metrics *monitor.SystemMetrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Start timer
 		start := time.Now()
@@ -163,6 +165,14 @@ func RequestLogger() gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 		clientIP := c.ClientIP()
+
+		if metrics != nil {
+			metrics.IncrementAPI()
+			metrics.APILatency.RecordDuration(latency)
+			if statusCode >= 400 {
+				metrics.IncrementAPIErrors()
+			}
+		}
 
 		// Log request
 		log.Printf("[API] %s | %s %s | %d | %v | %s",

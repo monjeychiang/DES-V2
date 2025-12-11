@@ -198,13 +198,17 @@ func main() {
 
 	// Balance manager with exchange integration (global account)
 	var balanceMgr *balance.Manager
-	if cfg.DryRun {
-		// Dry-run mode: no exchange client needed
+	useFixedBalance := cfg.DryRun || strings.EqualFold(cfg.BalanceSource, "fixed")
+	if useFixedBalance {
 		balanceMgr = balance.NewManager(nil, 30*time.Second)
-		balanceMgr.SetInitialBalance(cfg.DryRunInitialBalance)
-		log.Printf(i18n.Get("BalanceInitialized"), cfg.DryRunInitialBalance)
+		initial := cfg.DryRunInitialBalance
+		if initial <= 0 {
+			initial = 10000.0
+		}
+		balanceMgr.SetInitialBalance(initial)
+		log.Printf(i18n.Get("BalanceInitialized"), initial)
 	} else {
-		// Production mode: Try to use exchGateway if it implements balance.ExchangeClient
+		// Try to use exchGateway if it implements balance.ExchangeClient
 		if balClient, ok := exchGateway.(balance.ExchangeClient); ok {
 			balanceMgr = balance.NewManager(balClient, 30*time.Second)
 			balanceMgr.Start(ctx)
@@ -253,8 +257,13 @@ func main() {
 
 	// Order flow with dry-run wrapper
 	var orderQueue order.OrderQueue
-	if cfg.EnableOrderWAL && !cfg.DryRun {
-		pq, err := order.NewPersistentQueue(cfg.OrderWALPath, 200)
+	enableWal := cfg.EnableOrderWAL && (!cfg.DryRun || cfg.DryRunEnableOrderWAL)
+	walPath := cfg.OrderWALPath
+	if cfg.DryRun && cfg.DryRunEnableOrderWAL {
+		walPath = cfg.DryRunOrderWALPath
+	}
+	if enableWal {
+		pq, err := order.NewPersistentQueue(walPath, 200)
 		if err != nil {
 			log.Printf(i18n.Get("PersistentQueueFailed"), err)
 			orderQueue = order.NewQueue(200)
@@ -263,18 +272,23 @@ func main() {
 				log.Printf(i18n.Get("WalRecoveryError"), err)
 			}
 			orderQueue = pq
-			log.Printf(i18n.Get("OrderWalEnabled"), cfg.OrderWALPath)
+			log.Printf(i18n.Get("OrderWalEnabled"), walPath)
 		}
 	} else {
 		orderQueue = order.NewQueue(200)
 	}
 	exec := order.NewExecutor(database, bus, exchGateway, venue, cfg.BinanceTestnet)
 	mode := order.ModeProduction
-	if cfg.DryRun {
+	if cfg.DryRun || !cfg.ExecutionEnabled {
 		mode = order.ModeDryRun
 		log.Println(i18n.Get("DryRunMode"))
 	}
-	dryRunner := order.NewDryRunExecutor(mode, exec, cfg.DryRunInitialBalance)
+	dryRunner := order.NewDryRunExecutor(mode, exec, cfg.DryRunInitialBalance, order.DryRunSimConfig{
+		FeeRate:             cfg.DryRunFeeRate,
+		SlippageBps:         cfg.DryRunSlippageBps,
+		GatewayLatencyMinMs: cfg.DryRunGwLatencyMinMs,
+		GatewayLatencyMaxMs: cfg.DryRunGwLatencyMaxMs,
+	})
 	asyncExec := order.NewAsyncExecutorWithDryRun(dryRunner, 4) // V2 P0-B: Async Execution
 
 	// Multi-user: inject KeyManager and Gateway pool
@@ -283,11 +297,12 @@ func main() {
 		if gatewayMgr != nil {
 			exec.SetGatewayPool(gatewayMgr)
 		}
-		log.Println("🔐 KeyManager injected into Executor")
+		log.Println("KeyManager injected into Executor")
 	}
 
 	// System metrics for monitoring
 	sysMetrics := monitor.NewSystemMetrics()
+	exec.SetMetrics(sysMetrics)
 	log.Println(i18n.Get("SystemMetricsInit"))
 
 	// Periodically update metrics with gateway pool & multi-user stats.
@@ -413,23 +428,23 @@ func main() {
 	// Filled orders -> update positions and risk metrics (price fallback to latest cache)
 	go func() {
 		for msg := range filledSub {
-  			var (
-  				symbol string
-  				side   string
-  				qty    float64
-  				price  float64
-  				userID string
-  			)
- 			switch v := msg.(type) {
- 			case order.Order:
-  				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
-  				userID = v.UserID
- 			case struct {
- 				ID     string
- 				Symbol string
- 				Side   string
- 				Qty    float64
- 				Price  float64
+			var (
+				symbol string
+				side   string
+				qty    float64
+				price  float64
+				userID string
+			)
+			switch v := msg.(type) {
+			case order.Order:
+				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
+				userID = v.UserID
+			case struct {
+				ID     string
+				Symbol string
+				Side   string
+				Qty    float64
+				Price  float64
 			}:
 				symbol, side, qty, price = v.Symbol, v.Side, v.Qty, v.Price
 			default:
@@ -449,10 +464,10 @@ func main() {
 				log.Printf(i18n.Get("FillPriceZeroFallback"), symbol)
 			}
 
- 			// Snapshot previous position for realized PnL
- 			prev := stateMgr.Position(symbol)
- 
- 			// Update in-memory + DB position
+			// Snapshot previous position for realized PnL
+			prev := stateMgr.Position(symbol)
+
+			// Update in-memory + DB position
 			_, _ = stateMgr.RecordFill(ctx, userID, symbol, side, qty, fillPrice)
 
 			// Get updated position for cleanup check
@@ -505,23 +520,23 @@ func main() {
 				log.Printf(i18n.Get("RiskMetricsUpdateFailed"), err)
 			}
 
-  			// Handle balance updates based on trade side (per-user when possible)
-  			orderValue := qty * fillPrice
-  			balTarget := balanceMgr
-  			if userID != "" && userBalanceMgr != nil {
-  				if userBalMgr, err := userBalanceMgr.GetOrCreate(userID); err == nil {
-  					balTarget = userBalMgr
-  				} else {
-  					log.Printf("per-user balance manager init failed for user %s (fill): %v - using global balance", userID, err)
-  				}
-  			}
-  			if strings.ToUpper(side) == "BUY" {
-  				// Buy order - deduct locked balance
-  				balTarget.Deduct(orderValue)
-  			} else if strings.ToUpper(side) == "SELL" {
-  				// Sell order - add proceeds (unlock was already done if partial fill)
-  				balTarget.Add(orderValue)
-  			}
+			// Handle balance updates based on trade side (per-user when possible)
+			orderValue := qty * fillPrice
+			balTarget := balanceMgr
+			if userID != "" && userBalanceMgr != nil {
+				if userBalMgr, err := userBalanceMgr.GetOrCreate(userID); err == nil {
+					balTarget = userBalMgr
+				} else {
+					log.Printf("per-user balance manager init failed for user %s (fill): %v - using global balance", userID, err)
+				}
+			}
+			if strings.ToUpper(side) == "BUY" {
+				// Buy order - deduct locked balance
+				balTarget.Deduct(orderValue)
+			} else if strings.ToUpper(side) == "SELL" {
+				// Sell order - add proceeds (unlock was already done if partial fill)
+				balTarget.Add(orderValue)
+			}
 
 			// Clean up stop loss tracking if position is closed
 			if math.Abs(newPos.Qty) < 0.0001 {
@@ -589,10 +604,10 @@ func main() {
 					}
 				}()
 
- 				sig, ok := msg.(strategy.Signal)
- 				if !ok {
- 					return
- 				}
+				sig, ok := msg.(strategy.Signal)
+				if !ok {
+					return
+				}
 
 				// Resolve strategy owner and bound connection (if any)
 				var (
@@ -616,7 +631,7 @@ func main() {
 				if stratConnID.Valid {
 					connectionID = stratConnID.String
 				}
- 
+
 				// Gather context for risk decision
 				price := priceCache.get(sig.Symbol)
 				pos := stateMgr.Position(sig.Symbol)
@@ -652,9 +667,9 @@ func main() {
 					Balance:          balSnap.Total,
 					AvailableBalance: balSnap.Available,
 					LockedBalance:    balSnap.Locked,
- 					TotalExposure:    totalExposure,
- 				}
- 
+					TotalExposure:    totalExposure,
+				}
+
 				// I2: Single entry point for all risk checks (per-user when possible)
 				signalInput := risk.SignalInput{
 					Symbol: sig.Symbol,

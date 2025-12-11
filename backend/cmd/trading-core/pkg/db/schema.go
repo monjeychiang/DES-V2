@@ -240,6 +240,13 @@ func ApplyMigrations(d *Database) error {
 	if err := ensureColumn(d.DB, "connections", "key_version", "INTEGER DEFAULT 1"); err != nil {
 		return err
 	}
+	if err := ensureColumn(d.DB, "connections", "last_rotated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"); err != nil {
+		return err
+	}
+	// Backfill legacy rows to avoid NULL scans breaking time parsing.
+	if _, err := d.DB.Exec("UPDATE connections SET last_rotated_at = created_at WHERE last_rotated_at IS NULL"); err != nil {
+		return fmt.Errorf("backfill last_rotated_at: %w", err)
+	}
 
 	// Phase 2 Multi-User: Data Isolation
 	if err := ensureColumn(d.DB, "positions", "user_id", "TEXT"); err != nil {

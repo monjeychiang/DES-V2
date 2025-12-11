@@ -419,3 +419,29 @@
 - 若已提供 `/metrics` HTTP 端點，將這些指標列入輸出，方便接入 Prometheus / Grafana 之類的監控系統。
 
 透過上述壓力測試與監控指標，可以在實際運行環境中持續驗證本文件中性能優化的效果，並為下一階段（例如 DB 拆分或遷移）提供量化依據。
+
+---
+
+## 8. 測試索引（對應上述場景）
+
+- **整合測試（HTTP 層）**  
+  - `test/multi_user_integration_test.go`  
+    - `TestMultiUserEndToEnd`：對應使用指南全流程（註冊/登入/下單/隔離）。  
+    - `TestMultiUserPositionsIsolation`：檢查 `/positions` 只回本人的 `user_positions`。  
+    - `TestMultiUserStrategyIsolation`：策略綁定 `user_id`/`connection_id`，跨用戶操作被拒。  
+    - `TestMultiUserConnectionOwnershipEnforced`：惡意使用他人 `connection_id` 下單應失敗（場景 1）。  
+    - `TestSingleUserMultiConnectionsOrders`：同一用戶多連線下單，`orders.user_id/connection_id` 正確（場景 2）。
+
+- **資料庫層單元測試**  
+  - `pkg/db/queries_test.go`  
+    - `TestUserQueriesRequireUserID`：所有 `Get*ByUser` 必須帶 `user_id`。  
+    - `TestUserQueriesDataIsolation`：不同 user 的 orders 隔離。  
+    - `TestUserPositionsConcurrentUpserts`：多 user 同一 symbol 併發 upsert，`user_positions` 正確（場景 3）。
+
+- **壓力測試（需 `-tags=stress`）**  
+  - `test/stress/multi_user_stress_test.go`  
+    - `TestMultiUserGatewayPoolStress`：多 user 多 connection 併發命中 GatewayPool，驗證快取/解密/LRU 在併發下穩定。
+
+> 尚未自動化的場景：  
+> - 高延遲 Gateway 的端到端行為（場景 5）：可在 Gateway 假實作加 `time.Sleep`，用 HTTP 發多筆下單觀察 `/metrics` 與最終狀態。  
+> - 手動下單的 per-user 風控/餘額預檢（場景 4）：目前風控主用於策略路徑，可在 `/orders` 加預檢後補測。

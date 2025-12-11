@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -27,19 +28,76 @@ type DryRunExecutor struct {
 	mode     ExecutionMode
 	realExec *Executor
 	mockExec *MockExecutor
+	cfg      DryRunSimConfig
+	rng      *rand.Rand
 }
 
-func NewDryRunExecutor(mode ExecutionMode, real *Executor, initialBalance float64) *DryRunExecutor {
+type DryRunSimConfig struct {
+	FeeRate             float64 // decimal, e.g. 0.0004 = 4 bps
+	SlippageBps         float64 // basis points of slippage applied on fills
+	GatewayLatencyMinMs int     // simulated gateway latency lower bound
+	GatewayLatencyMaxMs int     // simulated gateway latency upper bound
+}
+
+func NewDryRunExecutor(mode ExecutionMode, real *Executor, initialBalance float64, cfg DryRunSimConfig) *DryRunExecutor {
+	min := cfg.GatewayLatencyMinMs
+	max := cfg.GatewayLatencyMaxMs
+	if max > 0 && min > max {
+		min, max = max, min
+	}
 	return &DryRunExecutor{
 		mode:     mode,
 		realExec: real,
 		mockExec: NewMockExecutor(initialBalance),
+		cfg:      cfg,
+		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
 // Execute routes orders to either real or mock executor.
 func (d *DryRunExecutor) Execute(ctx context.Context, o Order) error {
 	if d.mode == ModeDryRun {
+		// Apply slippage + fee simulation to bring DRY RUN closer to production.
+		price := o.Price
+		if price <= 0 {
+			price = 1 // guard to avoid zero; will be replaced downstream by cached price for PnL
+		}
+		slippageFrac := d.cfg.SlippageBps / 10000.0
+		if slippageFrac > 0 && d.rng != nil {
+			noise := d.rng.Float64() * slippageFrac
+			if strings.ToUpper(o.Side) == "BUY" {
+				price = price * (1 + noise)
+			} else {
+				price = price * (1 - noise)
+			}
+		}
+		orderWithPrice := o
+		orderWithPrice.Price = price
+
+		// Simulate gateway latency and emit into metrics (even when skipping exchange).
+		if d.realExec != nil && d.realExec.Metrics != nil {
+			minMs := d.cfg.GatewayLatencyMinMs
+			maxMs := d.cfg.GatewayLatencyMaxMs
+			if maxMs > 0 {
+				if minMs < 0 {
+					minMs = 0
+				}
+				if minMs > maxMs {
+					minMs, maxMs = maxMs, minMs
+				}
+				span := maxMs - minMs
+				delayMs := minMs
+				if span > 0 && d.rng != nil {
+					delayMs += d.rng.Intn(span + 1)
+				}
+				delay := time.Duration(delayMs) * time.Millisecond
+				if delay > 0 {
+					time.Sleep(delay)
+					d.realExec.Metrics.OrderGatewayLatency.RecordDuration(delay)
+				}
+			}
+		}
+
 		// 1) Persist order to DB and emit order events, but do NOT hit exchange.
 		if d.realExec != nil {
 			// Temporarily skip any external gateway so Executor.Handle only stores to DB.
@@ -49,7 +107,7 @@ func (d *DryRunExecutor) Execute(ctx context.Context, o Order) error {
 			// Currently Handle returns error if gateway lookup fails but we want to ignore that in DryRun?
 			// Actually Handle checks SkipExchange first and doesn't lookup gateway.
 			// So if Handle fails here, it's likely DB error.
-			if err := d.realExec.Handle(ctx, o); err != nil {
+			if err := d.realExec.Handle(ctx, orderWithPrice); err != nil {
 				log.Printf("DRY-RUN: Warning, persistence failed: %v", err)
 				// We don't block dry-run execution on DB failure, maybe?
 				// But let's return error if we want to be strict.
@@ -59,21 +117,22 @@ func (d *DryRunExecutor) Execute(ctx context.Context, o Order) error {
 		}
 
 		// 2) Run in-memory simulation for PnL / balance / positions.
-		if err := d.mockExec.Execute(o); err != nil {
+		if err := d.mockExec.Execute(orderWithPrice, d.cfg.FeeRate); err != nil {
 			fmt.Printf("DRY-RUN execute error: %v\n", err)
 			return err
 		}
 
 		// 3) Store a synthetic trade + emit filled event to exercise downstream logic.
 		if d.realExec != nil && d.realExec.DB != nil {
+			fee := price * o.Qty * d.cfg.FeeRate
 			trade := db.Trade{
 				ID:        uuid.NewString(),
 				OrderID:   o.ID,
 				Symbol:    o.Symbol,
 				Side:      o.Side,
-				Price:     o.Price,
+				Price:     price,
 				Qty:       o.Qty,
-				Fee:       0,
+				Fee:       fee,
 				CreatedAt: time.Now(),
 			}
 			if err := d.realExec.DB.CreateTrade(ctx, trade); err != nil {
@@ -92,7 +151,7 @@ func (d *DryRunExecutor) Execute(ctx context.Context, o Order) error {
 				Symbol: o.Symbol,
 				Side:   o.Side,
 				Qty:    o.Qty,
-				Price:  o.Price,
+				Price:  price,
 			})
 		}
 		return nil
@@ -141,7 +200,7 @@ func NewMockExecutor(initialBalance float64) *MockExecutor {
 	}
 }
 
-func (m *MockExecutor) Execute(o Order) error {
+func (m *MockExecutor) Execute(o Order, feeRate float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -168,11 +227,14 @@ func (m *MockExecutor) Execute(o Order) error {
 	m.updatePosition(mockOrder)
 
 	// Update balance (simple cash accounting)
+	fee := mathAbs(orderValue) * feeRate
 	if o.Price > 0 {
 		if strings.ToUpper(o.Side) == "BUY" {
 			m.balance -= orderValue
+			m.balance -= fee
 		} else if strings.ToUpper(o.Side) == "SELL" {
 			m.balance += orderValue
+			m.balance -= fee
 		}
 	}
 
@@ -217,4 +279,11 @@ func (m *MockExecutor) printState() {
 	if len(m.positions) == 0 {
 		fmt.Println("  (no open positions)")
 	}
+}
+
+func mathAbs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

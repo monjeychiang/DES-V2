@@ -4,10 +4,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
+	"trading-core/internal/monitor"
 	"trading-core/internal/order"
 	"trading-core/pkg/db"
 	exchange "trading-core/pkg/exchanges/common"
@@ -16,51 +21,182 @@ import (
 	"github.com/google/uuid"
 )
 
+type createStrategyRequest struct {
+	Name         string         `json:"name" binding:"required,min=1,max=120"`
+	StrategyType string         `json:"strategy_type" binding:"required,min=1"`
+	Symbol       string         `json:"symbol" binding:"required,min=1"`
+	Interval     string         `json:"interval" binding:"required,min=1"`
+	ConnectionID string         `json:"connection_id"`
+	Parameters   map[string]any `json:"parameters"`
+}
+
+type listStrategiesQuery struct {
+	Limit  int `form:"limit"`
+	Offset int `form:"offset"`
+}
+
+type createOrderRequest struct {
+	Symbol       string  `json:"symbol" binding:"required,min=1"`
+	Side         string  `json:"side" binding:"required,oneof=BUY SELL"`
+	Type         string  `json:"type" binding:"required,oneof=LIMIT MARKET"`
+	Price        float64 `json:"price"`
+	Qty          float64 `json:"qty" binding:"gt=0"`
+	ConnectionID string  `json:"connection_id" binding:"required"`
+}
+
+type listOrdersQuery struct {
+	Limit int `form:"limit"`
+}
+
+type createConnectionRequest struct {
+	Name         string `json:"name" binding:"required,min=1"`
+	ExchangeType string `json:"exchange_type" binding:"required,min=1"`
+	APIKey       string `json:"api_key" binding:"required,min=1"`
+	APISecret    string `json:"api_secret" binding:"required,min=1"`
+}
+
+type updateStrategyBindingRequest struct {
+	ConnectionID string `json:"connection_id"`
+}
+
+func (q *listStrategiesQuery) normalize() {
+	if q.Limit <= 0 {
+		q.Limit = 50
+	}
+	if q.Limit > 200 {
+		q.Limit = 200
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+}
+
+func (q *listOrdersQuery) normalize() {
+	if q.Limit <= 0 {
+		q.Limit = 100
+	}
+	if q.Limit > 500 {
+		q.Limit = 500
+	}
+}
+
+func respondError(c *gin.Context, status int, code, msg string) {
+	c.JSON(status, gin.H{
+		"code":  code,
+		"error": msg,
+	})
+}
+
+func validateStrategyParams(strategyType string, params map[string]any) error {
+	switch strings.ToLower(strategyType) {
+	case "ma_cross":
+		fast, ok := asFloat(params["fast"])
+		slow, ok2 := asFloat(params["slow"])
+		if !ok || !ok2 {
+			return fmt.Errorf("ma_cross.fast and ma_cross.slow are required")
+		}
+		if fast <= 0 || slow <= 0 || fast >= slow {
+			return fmt.Errorf("ma_cross.fast/slow must be >0 and fast < slow")
+		}
+		if size, ok := asFloat(params["size"]); ok && size <= 0 {
+			return fmt.Errorf("ma_cross.size must be > 0")
+		}
+	case "rsi":
+		period, ok := asFloat(params["period"])
+		oversold, ok2 := asFloat(params["oversold"])
+		overbought, ok3 := asFloat(params["overbought"])
+		if !ok || !ok2 || !ok3 {
+			return fmt.Errorf("rsi.period/oversold/overbought are required")
+		}
+		if period <= 0 {
+			return fmt.Errorf("rsi.period must be > 0")
+		}
+		if oversold <= 0 || overbought <= 0 || oversold >= overbought {
+			return fmt.Errorf("rsi oversold/overbought must be >0 and oversold < overbought")
+		}
+		if size, ok := asFloat(params["size"]); ok && size <= 0 {
+			return fmt.Errorf("rsi.size must be > 0")
+		}
+	case "bollinger":
+		period, ok := asFloat(params["period"])
+		stddev, ok2 := asFloat(params["std_dev"])
+		if !ok || !ok2 {
+			return fmt.Errorf("bollinger.period and bollinger.std_dev are required")
+		}
+		if period <= 0 || stddev <= 0 {
+			return fmt.Errorf("bollinger.period and bollinger.std_dev must be > 0")
+		}
+		if size, ok := asFloat(params["size"]); ok && size <= 0 {
+			return fmt.Errorf("bollinger.size must be > 0")
+		}
+	default:
+		// Unknown strategy type: no-op (could be validated elsewhere)
+	}
+	return nil
+}
+
+func asFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
 // createStrategy creates a new strategy instance bound to the current user (and optional connection).
 func (s *Server) createStrategy(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "user not authenticated")
 		return
 	}
 
-	var req struct {
-		Name         string         `json:"name"`
-		StrategyType string         `json:"strategy_type"`
-		Symbol       string         `json:"symbol"`
-		Interval     string         `json:"interval"`
-		ConnectionID string         `json:"connection_id"`
-		Parameters   map[string]any `json:"parameters"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+	var req createStrategyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request payload")
 		return
 	}
-	if req.Name == "" || req.StrategyType == "" || req.Symbol == "" || req.Interval == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name, strategy_type, symbol, interval are required"})
+	if req.Parameters == nil {
+		req.Parameters = map[string]any{}
+	}
+
+	if err := validateStrategyParams(req.StrategyType, req.Parameters); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_PARAMETERS", err.Error())
 		return
 	}
 
+	ctx := c.Request.Context()
 	// If connection_id provided, validate ownership and active status.
 	if req.ConnectionID != "" {
-		conn, err := s.DB.Queries().GetConnectionByID(c.Request.Context(), userID, req.ConnectionID)
+		conn, err := s.DB.Queries().GetConnectionByID(ctx, userID, req.ConnectionID)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection for current user"})
+				respondError(c, http.StatusBadRequest, "INVALID_CONNECTION", "invalid connection for current user")
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 			}
 			return
 		}
 		if !conn.IsActive {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "connection is not active"})
+			respondError(c, http.StatusBadRequest, "CONNECTION_INACTIVE", "connection is not active")
 			return
 		}
 	}
 
 	paramsJSON, err := json.Marshal(req.Parameters)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parameters"})
+		respondError(c, http.StatusBadRequest, "INVALID_PARAMETERS", "invalid parameters")
 		return
 	}
 
@@ -74,7 +210,7 @@ func (s *Server) createStrategy(c *gin.Context) {
 	`, id, req.Name, req.StrategyType, req.Symbol, req.Interval, string(paramsJSON),
 		userID, req.ConnectionID, now, now)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 
@@ -97,9 +233,17 @@ func (s *Server) createStrategy(c *gin.Context) {
 func (s *Server) getStrategies(c *gin.Context) {
 	userID := CurrentUserID(c)
 
+	var q listStrategiesQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_QUERY", "invalid query parameters")
+		return
+	}
+	q.normalize()
+
+	ctx := c.Request.Context()
 	// Query strategies from DB, including optional binding info.
-	rows, err := s.DB.DB.Query(`
-		SELECT 
+	rows, err := s.DB.DB.QueryContext(ctx, `
+		SELECT
 			si.id,
 			si.name,
 			si.strategy_type,
@@ -117,9 +261,11 @@ func (s *Server) getStrategies(c *gin.Context) {
 		FROM strategy_instances si
 		LEFT JOIN connections c ON si.connection_id = c.id
 		WHERE si.user_id = ? OR si.user_id IS NULL
-	`, userID)
+		ORDER BY si.created_at DESC
+		LIMIT ? OFFSET ?
+	`, userID, q.Limit, q.Offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 	defer rows.Close()
@@ -149,6 +295,8 @@ func (s *Server) getStrategies(c *gin.Context) {
 			&createdAt,
 			&updatedAt,
 		); err != nil {
+			// Record scan error for visibility
+			_ = c.Error(err)
 			continue
 		}
 
@@ -173,6 +321,14 @@ func (s *Server) getStrategies(c *gin.Context) {
 			"updated_at":               updatedAt,
 		})
 	}
+
+	if err := rows.Err(); err != nil {
+		respondError(c, http.StatusInternalServerError, "DB_SCAN_ERROR", "failed to read strategies")
+		return
+	}
+
+	c.Header("X-Result-Limit", strconv.Itoa(q.Limit))
+	c.Header("X-Result-Offset", strconv.Itoa(q.Offset))
 	c.JSON(http.StatusOK, strategies)
 }
 
@@ -188,15 +344,23 @@ func nullableString(ns sql.NullString) *string {
 func (s *Server) getOrders(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "user not authenticated")
 		return
 	}
 
-	orders, err := s.DB.Queries().GetOrdersByUser(c.Request.Context(), userID, 100)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	var q listOrdersQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_QUERY", "invalid query parameters")
 		return
 	}
+	q.normalize()
+
+	orders, err := s.DB.Queries().GetOrdersByUser(c.Request.Context(), userID, q.Limit)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	c.Header("X-Result-Limit", strconv.Itoa(q.Limit))
 	c.JSON(http.StatusOK, orders)
 }
 
@@ -204,13 +368,13 @@ func (s *Server) getOrders(c *gin.Context) {
 func (s *Server) getPositions(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "user not authenticated")
 		return
 	}
 
 	positions, err := s.DB.Queries().GetPositionsByUser(c.Request.Context(), userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, positions)
@@ -220,52 +384,57 @@ func (s *Server) getPositions(c *gin.Context) {
 func (s *Server) createOrder(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "user not authenticated")
 		return
 	}
 	if s.OrderQueue == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order queue not available"})
+		respondError(c, http.StatusServiceUnavailable, "QUEUE_UNAVAILABLE", "order queue not available")
 		return
 	}
 
-	var req struct {
-		Symbol       string  `json:"symbol"`
-		Side         string  `json:"side"`
-		Type         string  `json:"type"`
-		Price        float64 `json:"price"`
-		Qty          float64 `json:"qty"`
-		ConnectionID string  `json:"connection_id"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+	var req createOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request payload")
 		return
 	}
-	if req.Symbol == "" || req.Side == "" || req.Type == "" || req.Qty <= 0 || req.ConnectionID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol, side, type, qty, connection_id are required"})
+	if strings.EqualFold(req.Type, "LIMIT") && req.Price <= 0 {
+		respondError(c, http.StatusBadRequest, "INVALID_PRICE", "price must be > 0 for LIMIT orders")
 		return
 	}
 
-	// Validate connection ownership and status.
-	conn, err := s.DB.Queries().GetConnectionByID(c.Request.Context(), userID, req.ConnectionID)
+	ctx := c.Request.Context()
+	conn, err := s.DB.Queries().GetConnectionByID(ctx, userID, req.ConnectionID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection for current user"})
+			respondError(c, http.StatusBadRequest, "INVALID_CONNECTION", "invalid connection for current user")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			log.Printf("createOrder: failed to get connection %s for user %s: %v", req.ConnectionID, userID, err)
+			respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		}
 		return
 	}
-	// If connection uses encrypted keys but KeyManager is not configured, treat as server misconfiguration.
 	if conn.APIKeyEncrypted != "" && s.KeyManager == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypted connection requires KeyManager"})
+		respondError(c, http.StatusInternalServerError, "CONFIG_ERROR", "encrypted connection requires KeyManager")
 		return
 	}
 	if !conn.IsActive {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "connection is not active"})
+		respondError(c, http.StatusBadRequest, "CONNECTION_INACTIVE", "connection is not active")
 		return
 	}
 
-	// Map exchange type to market.
+	if s.UserBalances != nil {
+		if mgr, err := s.UserBalances.GetOrCreate(userID); err == nil && mgr != nil {
+			cost := req.Price * req.Qty
+			if cost <= 0 {
+				cost = req.Qty
+			}
+			if bal := mgr.GetBalance(); cost > bal.Available {
+				respondError(c, http.StatusBadRequest, "INSUFFICIENT_BALANCE", "insufficient balance")
+				return
+			}
+		}
+	}
+
 	var market string
 	switch conn.ExchangeType {
 	case "binance-spot":
@@ -274,6 +443,9 @@ func (s *Server) createOrder(c *gin.Context) {
 		market = string(exchange.MarketUSDTFut)
 	case "binance-coinfut":
 		market = string(exchange.MarketCoinFut)
+	default:
+		respondError(c, http.StatusBadRequest, "UNSUPPORTED_EXCHANGE", "unsupported exchange type")
+		return
 	}
 
 	o := order.Order{
@@ -323,7 +495,7 @@ func (s *Server) getBalance(c *gin.Context) {
 	// Fallback to global engine balance.
 	bal, err := s.Engine.GetBalance(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		respondError(c, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, bal)
@@ -350,7 +522,7 @@ func (s *Server) getSystemStatus(c *gin.Context) {
 func (s *Server) getRiskMetrics(c *gin.Context) {
 	metrics, err := s.Engine.GetRiskMetrics(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		respondError(c, http.StatusServiceUnavailable, "ENGINE_UNAVAILABLE", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, metrics)
@@ -374,14 +546,14 @@ func (s *Server) getStrategyPerformance(c *gin.Context) {
 	if from != "" {
 		fromTime, err = time.Parse("2006-01-02", from)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date"})
+			respondError(c, http.StatusBadRequest, "INVALID_FROM_DATE", "invalid from date")
 			return
 		}
 	}
 	if to != "" {
 		toTime, err = time.Parse("2006-01-02", to)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to date"})
+			respondError(c, http.StatusBadRequest, "INVALID_TO_DATE", "invalid to date")
 			return
 		}
 		// include whole day
@@ -405,7 +577,7 @@ func (s *Server) getStrategyPerformance(c *gin.Context) {
 		ORDER BY d ASC
 	`, id, fromTime, toTime)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 	defer rows.Close()
@@ -442,13 +614,13 @@ func (s *Server) getStrategyPerformance(c *gin.Context) {
 func (s *Server) listConnections(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthorized")
 		return
 	}
 
 	conns, err := s.DB.ListConnectionsByUser(c.Request.Context(), userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 
@@ -468,75 +640,86 @@ func (s *Server) listConnections(c *gin.Context) {
 
 // createConnection creates a new exchange connection for the current user.
 func (s *Server) createConnection(c *gin.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("createConnection: panic: %v\n%s", r, debug.Stack())
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+		}
+	}()
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthorized")
+		return
+	}
+	log.Printf("createConnection: user=%s", userID)
+
+	var req createConnectionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("createConnection: invalid payload: %v", err)
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request payload")
+		return
+	}
+	log.Printf("createConnection: payload user=%s name=%s exch=%s", userID, req.Name, req.ExchangeType)
+
+	if s.DB == nil || s.DB.DB == nil {
+		log.Printf("createConnection: DB not initialized")
+		respondError(c, http.StatusInternalServerError, "CONFIG_ERROR", "database not initialized")
 		return
 	}
 
-	var req struct {
-		Name         string `json:"name"`
-		ExchangeType string `json:"exchange_type"`
-		APIKey       string `json:"api_key"`
-		APISecret    string `json:"api_secret"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
-		return
-	}
-	if req.Name == "" || req.ExchangeType == "" || req.APIKey == "" || req.APISecret == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name, exchange_type, api_key, api_secret are required"})
+	if s.KeyManager == nil {
+		respondError(c, http.StatusInternalServerError, "CONFIG_ERROR", "KeyManager required for connection storage")
 		return
 	}
 
 	now := time.Now()
 	conn := db.Connection{
-		ID:           uuid.NewString(),
-		UserID:       userID,
-		ExchangeType: req.ExchangeType,
-		Name:         req.Name,
-		IsActive:     true,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:            uuid.NewString(),
+		UserID:        userID,
+		ExchangeType:  req.ExchangeType,
+		Name:          req.Name,
+		IsActive:      true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastRotatedAt: now,
 	}
 
-	// Use encryption if KeyManager is available
-	if s.KeyManager != nil {
-		encKey, err := s.KeyManager.Encrypt(req.APIKey)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt api_key"})
-			return
-		}
-		encSecret, err := s.KeyManager.Encrypt(req.APISecret)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt api_secret"})
-			return
-		}
-		conn.APIKeyEncrypted = encKey
-		conn.APISecretEncrypted = encSecret
-		conn.KeyVersion = s.KeyManager.CurrentVersion()
-
-		if err := s.DB.Queries().CreateConnectionEncrypted(c.Request.Context(), conn); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	} else {
-		// Fallback to plaintext (legacy mode)
-		conn.APIKey = req.APIKey
-		conn.APISecret = req.APISecret
-
-		if err := s.DB.CreateConnection(c.Request.Context(), conn); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	// Always encrypt with KeyManager
+	encKey, err := s.KeyManager.Encrypt(req.APIKey)
+	if err != nil {
+		log.Printf("createConnection: encrypt api_key failed: %v", err)
+		respondError(c, http.StatusInternalServerError, "ENCRYPTION_ERROR", "failed to encrypt api_key")
+		return
 	}
+	log.Printf("createConnection: encrypted api_key for user %s", userID)
+	encSecret, err := s.KeyManager.Encrypt(req.APISecret)
+	if err != nil {
+		log.Printf("createConnection: encrypt api_secret failed: %v", err)
+		respondError(c, http.StatusInternalServerError, "ENCRYPTION_ERROR", "failed to encrypt api_secret")
+		return
+	}
+	conn.APIKeyEncrypted = encKey
+	conn.APISecretEncrypted = encSecret
+	conn.KeyVersion = s.KeyManager.CurrentVersion()
+	// Keep plaintext fields for backward compatibility with components that still expect them.
+	conn.APIKey = req.APIKey
+	conn.APISecret = req.APISecret
+
+	if err := s.DB.Queries().CreateConnectionEncrypted(c.Request.Context(), conn); err != nil {
+		log.Printf("createConnection: db error for user %s: %v", userID, err)
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	log.Printf("createConnection: created id=%s user=%s exch=%s", conn.ID, userID, conn.ExchangeType)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id":            conn.ID,
 		"name":          conn.Name,
 		"exchange_type": conn.ExchangeType,
 		"is_active":     conn.IsActive,
-		"encrypted":     s.KeyManager != nil,
+		"encrypted":     true,
+		"key_version":   conn.KeyVersion,
+		"last_rotated":  conn.LastRotatedAt,
 		"created_at":    conn.CreatedAt,
 		"updated_at":    conn.UpdatedAt,
 	})
@@ -546,22 +729,22 @@ func (s *Server) createConnection(c *gin.Context) {
 func (s *Server) deactivateConnection(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthorized")
 		return
 	}
 
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing connection id"})
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "missing connection id")
 		return
 	}
 
 	if err := s.DB.DeactivateConnection(c.Request.Context(), id, userID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "connection does not belong to current user"})
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "connection does not belong to current user")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 
@@ -572,21 +755,19 @@ func (s *Server) deactivateConnection(c *gin.Context) {
 func (s *Server) updateStrategyBinding(c *gin.Context) {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthorized")
 		return
 	}
 
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing strategy id"})
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "missing strategy id")
 		return
 	}
 
-	var req struct {
-		ConnectionID string `json:"connection_id"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+	var req updateStrategyBindingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request payload")
 		return
 	}
 
@@ -594,15 +775,15 @@ func (s *Server) updateStrategyBinding(c *gin.Context) {
 	var owner sql.NullString
 	err := s.DB.DB.QueryRow(`SELECT user_id FROM strategy_instances WHERE id = ?`, id).Scan(&owner)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "strategy not found"})
+		respondError(c, http.StatusNotFound, "STRATEGY_NOT_FOUND", "strategy not found")
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 	if owner.Valid && owner.String != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "strategy does not belong to current user"})
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "strategy does not belong to current user")
 		return
 	}
 
@@ -614,11 +795,11 @@ func (s *Server) updateStrategyBinding(c *gin.Context) {
 			WHERE id = ? AND user_id = ? AND is_active = 1
 		`, req.ConnectionID, userID).Scan(&count)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 			return
 		}
 		if count == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection for current user"})
+			respondError(c, http.StatusBadRequest, "INVALID_CONNECTION", "invalid connection for current user")
 			return
 		}
 	}
@@ -632,7 +813,7 @@ func (s *Server) updateStrategyBinding(c *gin.Context) {
 		WHERE id = ?
 	`, userID, req.ConnectionID, id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 
@@ -647,7 +828,7 @@ func (s *Server) startStrategy(c *gin.Context) {
 		return
 	}
 	if err := s.Engine.StartStrategy(c.Request.Context(), id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "ENGINE_ERROR", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "started"})
@@ -659,7 +840,7 @@ func (s *Server) pauseStrategy(c *gin.Context) {
 		return
 	}
 	if err := s.Engine.PauseStrategy(c.Request.Context(), id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "ENGINE_ERROR", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "paused"})
@@ -671,7 +852,7 @@ func (s *Server) stopStrategy(c *gin.Context) {
 		return
 	}
 	if err := s.Engine.StopStrategy(c.Request.Context(), id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "ENGINE_ERROR", err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
@@ -685,7 +866,7 @@ func (s *Server) panicSellStrategy(c *gin.Context) {
 
 	userID := CurrentUserID(c)
 	if err := s.Engine.PanicSellStrategy(c.Request.Context(), id, userID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "ENGINE_ERROR", err.Error())
 		return
 	}
 
@@ -698,13 +879,27 @@ func (s *Server) updateStrategyParams(c *gin.Context) {
 		return
 	}
 	var params map[string]any
-	if err := c.BindJSON(&params); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := c.ShouldBindJSON(&params); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request payload")
+		return
+	}
+
+	var strategyType string
+	if err := s.DB.DB.QueryRow(`SELECT strategy_type FROM strategy_instances WHERE id = ?`, id).Scan(&strategyType); err != nil {
+		if err == sql.ErrNoRows {
+			respondError(c, http.StatusNotFound, "STRATEGY_NOT_FOUND", "strategy not found")
+			return
+		}
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	if err := validateStrategyParams(strategyType, params); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_PARAMETERS", err.Error())
 		return
 	}
 
 	if err := s.Engine.UpdateStrategyParams(c.Request.Context(), id, params); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "ENGINE_ERROR", err.Error())
 		return
 	}
 
@@ -716,24 +911,24 @@ func (s *Server) updateStrategyParams(c *gin.Context) {
 func (s *Server) canAccessStrategy(c *gin.Context, strategyID string) bool {
 	userID := CurrentUserID(c)
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		respondError(c, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthorized")
 		return false
 	}
 
 	var owner sql.NullString
 	err := s.DB.DB.QueryRow(`SELECT user_id FROM strategy_instances WHERE id = ?`, strategyID).Scan(&owner)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "strategy not found"})
+		respondError(c, http.StatusNotFound, "STRATEGY_NOT_FOUND", "strategy not found")
 		return false
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return false
 	}
 
 	// Allow if strategy is unowned (user_id NULL) or belongs to current user.
 	if owner.Valid && owner.String != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "strategy does not belong to current user"})
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "strategy does not belong to current user")
 		return false
 	}
 	return true
@@ -742,17 +937,68 @@ func (s *Server) canAccessStrategy(c *gin.Context, strategyID string) bool {
 // getMetrics returns system performance metrics.
 func (s *Server) getMetrics(c *gin.Context) {
 	if s.Metrics == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "metrics not available"})
+		respondError(c, http.StatusServiceUnavailable, "METRICS_UNAVAILABLE", "metrics not available")
 		return
 	}
 	snapshot := s.Metrics.GetSnapshot()
 	c.JSON(http.StatusOK, snapshot)
 }
 
+// getPromMetrics returns a minimal Prometheus text exposition of key metrics.
+func (s *Server) getPromMetrics(c *gin.Context) {
+	if s.Metrics == nil {
+		c.String(http.StatusServiceUnavailable, "# metrics not available\n")
+		return
+	}
+	snapshot := s.Metrics.GetSnapshot()
+
+	var b strings.Builder
+	// Counters
+	fmt.Fprintf(&b, "des_api_requests_total %d\n", snapshot.APIRequests)
+	fmt.Fprintf(&b, "des_api_errors_total %d\n", snapshot.APIErrors)
+	fmt.Fprintf(&b, "des_orders_processed_total %d\n", snapshot.OrdersProcessed)
+	fmt.Fprintf(&b, "des_ticks_processed_total %d\n", snapshot.TicksProcessed)
+	fmt.Fprintf(&b, "des_signals_generated_total %d\n", snapshot.SignalsGenerated)
+	fmt.Fprintf(&b, "des_errors_total %d\n", snapshot.ErrorsCount)
+
+	// Gauges for latency (ms)
+	writeLatency := func(prefix string, ls monitor.LatencyStats) {
+		if ls.Count == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "des_%s_latency_ms_avg %f\n", prefix, ls.Avg)
+		fmt.Fprintf(&b, "des_%s_latency_ms_p50 %f\n", prefix, ls.P50)
+		fmt.Fprintf(&b, "des_%s_latency_ms_p95 %f\n", prefix, ls.P95)
+		fmt.Fprintf(&b, "des_%s_latency_ms_p99 %f\n", prefix, ls.P99)
+	}
+	writeLatency("api", snapshot.APILatency)
+	writeLatency("order", snapshot.OrderLatency)
+	writeLatency("order_gateway", snapshot.OrderGatewayLatency)
+	writeLatency("order_persist", snapshot.OrderPersistLatency)
+	writeLatency("strategy", snapshot.StrategyLatency)
+	writeLatency("db", snapshot.DBLatency)
+
+	// Gauges for system state
+	fmt.Fprintf(&b, "des_gateway_total %d\n", snapshot.GatewayPool.TotalGateways)
+	fmt.Fprintf(&b, "des_gateway_max %d\n", snapshot.GatewayPool.MaxSize)
+	fmt.Fprintf(&b, "des_gateway_unhealthy %d\n", snapshot.GatewayPool.UnhealthyCount)
+	for exType, count := range snapshot.GatewayPool.ByExchangeType {
+		fmt.Fprintf(&b, "des_gateway_by_exchange{type=\"%s\"} %d\n", exType, count)
+	}
+	fmt.Fprintf(&b, "des_risk_active_users %d\n", snapshot.RiskActiveUsers)
+	fmt.Fprintf(&b, "des_balance_active_users %d\n", snapshot.BalanceActiveUsers)
+	fmt.Fprintf(&b, "des_goroutines %d\n", snapshot.GoroutineCount)
+	fmt.Fprintf(&b, "des_heap_alloc_bytes %d\n", snapshot.HeapAlloc)
+	fmt.Fprintf(&b, "des_heap_sys_bytes %d\n", snapshot.HeapSys)
+
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.String(http.StatusOK, b.String())
+}
+
 // getQueueMetrics returns order queue statistics.
 func (s *Server) getQueueMetrics(c *gin.Context) {
 	if s.OrderQueue == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order queue not available"})
+		respondError(c, http.StatusServiceUnavailable, "QUEUE_UNAVAILABLE", "order queue not available")
 		return
 	}
 

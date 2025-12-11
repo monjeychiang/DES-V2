@@ -38,7 +38,12 @@ func main() {
 	ctx := context.Background()
 
 	// We don't need a real executor or gateway here; MockExecutor will handle everything.
-	dry := order.NewDryRunExecutor(order.ModeDryRun, nil, initialBalance)
+	dry := order.NewDryRunExecutor(order.ModeDryRun, nil, initialBalance, order.DryRunSimConfig{
+		FeeRate:             cfg.DryRunFeeRate,
+		SlippageBps:         cfg.DryRunSlippageBps,
+		GatewayLatencyMinMs: cfg.DryRunGwLatencyMinMs,
+		GatewayLatencyMaxMs: cfg.DryRunGwLatencyMaxMs,
+	})
 
 	symbol := "BTCUSDT"
 

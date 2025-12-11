@@ -18,16 +18,21 @@ type SystemMetrics struct {
 	OrderLatency    *LatencyHistogram
 	StrategyLatency *LatencyHistogram
 	DBLatency       *LatencyHistogram
+	APILatency      *LatencyHistogram
+	OrderGatewayLatency *LatencyHistogram
+	OrderPersistLatency *LatencyHistogram
 
 	// Counters
 	ordersProcessed  uint64
 	ticksProcessed   uint64
 	signalsGenerated uint64
 	errorsCount      uint64
+	apiRequests      uint64
+	apiErrors        uint64
 
 	// Gateway pool & multi-user stats (updated periodically from main).
-	gatewayStats     gateway.PoolStats
-	riskActiveUsers  int
+	gatewayStats       gateway.PoolStats
+	riskActiveUsers    int
 	balanceActiveUsers int
 
 	// Snapshot
@@ -47,10 +52,13 @@ type LatencyHistogram struct {
 // NewSystemMetrics creates a new metrics instance.
 func NewSystemMetrics() *SystemMetrics {
 	return &SystemMetrics{
-		OrderLatency:    NewLatencyHistogram(1000),
-		StrategyLatency: NewLatencyHistogram(1000),
-		DBLatency:       NewLatencyHistogram(1000),
-		lastUpdate:      time.Now(),
+		OrderLatency:         NewLatencyHistogram(1000),
+		OrderGatewayLatency:  NewLatencyHistogram(1000),
+		OrderPersistLatency:  NewLatencyHistogram(1000),
+		StrategyLatency:      NewLatencyHistogram(1000),
+		DBLatency:            NewLatencyHistogram(1000),
+		APILatency:           NewLatencyHistogram(1000),
+		lastUpdate:           time.Now(),
 	}
 }
 
@@ -156,22 +164,37 @@ func (m *SystemMetrics) IncrementErrors() {
 	atomic.AddUint64(&m.errorsCount, 1)
 }
 
+// IncrementAPI increments API request counter.
+func (m *SystemMetrics) IncrementAPI() {
+	atomic.AddUint64(&m.apiRequests, 1)
+}
+
+// IncrementAPIErrors increments API error counter.
+func (m *SystemMetrics) IncrementAPIErrors() {
+	atomic.AddUint64(&m.apiErrors, 1)
+}
+
 // Snapshot returns current metrics snapshot.
 type MetricsSnapshot struct {
-	OrderLatency     LatencyStats `json:"order_latency"`
-	StrategyLatency  LatencyStats `json:"strategy_latency"`
-	DBLatency        LatencyStats `json:"db_latency"`
-	OrdersProcessed  uint64       `json:"orders_processed"`
-	TicksProcessed   uint64       `json:"ticks_processed"`
-	SignalsGenerated uint64       `json:"signals_generated"`
-	ErrorsCount      uint64       `json:"errors_count"`
-	GatewayPool      gateway.PoolStats `json:"gateway_pool"`
-	RiskActiveUsers  int               `json:"risk_active_users"`
-	BalanceActiveUsers int             `json:"balance_active_users"`
-	GoroutineCount   int          `json:"goroutine_count"`
-	HeapAlloc        uint64       `json:"heap_alloc_bytes"`
-	HeapSys          uint64       `json:"heap_sys_bytes"`
-	Timestamp        time.Time    `json:"timestamp"`
+	OrderLatency       LatencyStats      `json:"order_latency"`
+	OrderGatewayLatency LatencyStats      `json:"order_gateway_latency"`
+	OrderPersistLatency LatencyStats      `json:"order_persist_latency"`
+	StrategyLatency    LatencyStats      `json:"strategy_latency"`
+	DBLatency          LatencyStats      `json:"db_latency"`
+	APILatency         LatencyStats      `json:"api_latency"`
+	OrdersProcessed    uint64            `json:"orders_processed"`
+	TicksProcessed     uint64            `json:"ticks_processed"`
+	SignalsGenerated   uint64            `json:"signals_generated"`
+	ErrorsCount        uint64            `json:"errors_count"`
+	APIRequests        uint64            `json:"api_requests"`
+	APIErrors          uint64            `json:"api_errors"`
+	GatewayPool        gateway.PoolStats `json:"gateway_pool"`
+	RiskActiveUsers    int               `json:"risk_active_users"`
+	BalanceActiveUsers int               `json:"balance_active_users"`
+	GoroutineCount     int               `json:"goroutine_count"`
+	HeapAlloc          uint64            `json:"heap_alloc_bytes"`
+	HeapSys            uint64            `json:"heap_sys_bytes"`
+	Timestamp          time.Time         `json:"timestamp"`
 }
 
 // GetSnapshot returns a point-in-time metrics snapshot.
@@ -186,20 +209,25 @@ func (m *SystemMetrics) GetSnapshot() MetricsSnapshot {
 	m.mu.RUnlock()
 
 	return MetricsSnapshot{
-		OrderLatency:     m.OrderLatency.Stats(),
-		StrategyLatency:  m.StrategyLatency.Stats(),
-		DBLatency:        m.DBLatency.Stats(),
-		OrdersProcessed:  atomic.LoadUint64(&m.ordersProcessed),
-		TicksProcessed:   atomic.LoadUint64(&m.ticksProcessed),
-		SignalsGenerated: atomic.LoadUint64(&m.signalsGenerated),
-		ErrorsCount:      atomic.LoadUint64(&m.errorsCount),
-		GatewayPool:      gwStats,
-		RiskActiveUsers:  riskUsers,
-		BalanceActiveUsers: balanceUsers,
-		GoroutineCount:   runtime.NumGoroutine(),
-		HeapAlloc:        memStats.HeapAlloc,
-		HeapSys:          memStats.HeapSys,
-		Timestamp:        time.Now(),
+		OrderLatency:        m.OrderLatency.Stats(),
+		OrderGatewayLatency: m.OrderGatewayLatency.Stats(),
+		OrderPersistLatency: m.OrderPersistLatency.Stats(),
+		StrategyLatency:     m.StrategyLatency.Stats(),
+		DBLatency:           m.DBLatency.Stats(),
+		APILatency:          m.APILatency.Stats(),
+		OrdersProcessed:     atomic.LoadUint64(&m.ordersProcessed),
+		TicksProcessed:      atomic.LoadUint64(&m.ticksProcessed),
+		SignalsGenerated:    atomic.LoadUint64(&m.signalsGenerated),
+		ErrorsCount:         atomic.LoadUint64(&m.errorsCount),
+		APIRequests:         atomic.LoadUint64(&m.apiRequests),
+		APIErrors:           atomic.LoadUint64(&m.apiErrors),
+		GatewayPool:         gwStats,
+		RiskActiveUsers:     riskUsers,
+		BalanceActiveUsers:  balanceUsers,
+		GoroutineCount:      runtime.NumGoroutine(),
+		HeapAlloc:           memStats.HeapAlloc,
+		HeapSys:             memStats.HeapSys,
+		Timestamp:           time.Now(),
 	}
 }
 

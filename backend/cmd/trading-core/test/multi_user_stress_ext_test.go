@@ -1,7 +1,7 @@
 //go:build stress
 // +build stress
 
-package test
+package main
 
 import (
 	"context"
@@ -96,14 +96,14 @@ func TestMultiUserGatewayPoolStress(t *testing.T) {
 			}
 
 			conn := db.Connection{
-				ID:                connID,
-				UserID:            userID,
-				ExchangeType:      "binance-spot",
-				Name:              "stress-conn",
-				APIKeyEncrypted:   apiKeyEnc,
+				ID:                 connID,
+				UserID:             userID,
+				ExchangeType:       "binance-spot",
+				Name:               "stress-conn",
+				APIKeyEncrypted:    apiKeyEnc,
 				APISecretEncrypted: apiSecretEnc,
-				KeyVersion:        keyMgr.CurrentVersion(),
-				IsActive:          true,
+				KeyVersion:         keyMgr.CurrentVersion(),
+				IsActive:           true,
 			}
 			if err := userQueries.CreateConnectionEncrypted(ctx, conn); err != nil {
 				t.Fatalf("CreateConnectionEncrypted: %v", err)

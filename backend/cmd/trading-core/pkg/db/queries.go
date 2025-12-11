@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -212,7 +213,7 @@ func (q *UserQueries) GetConnectionsByUser(ctx context.Context, userID string) (
 		SELECT id, user_id, exchange_type, name, 
 		       COALESCE(api_key, ''), COALESCE(api_secret, ''),
 		       COALESCE(api_key_encrypted, ''), COALESCE(api_secret_encrypted, ''),
-		       COALESCE(key_version, 1), is_active, created_at, updated_at
+		       COALESCE(key_version, 1), is_active, created_at, updated_at, last_rotated_at
 		FROM connections
 		WHERE user_id = ? AND is_active = 1
 		ORDER BY created_at DESC
@@ -227,7 +228,7 @@ func (q *UserQueries) GetConnectionsByUser(ctx context.Context, userID string) (
 		var c Connection
 		if err := rows.Scan(&c.ID, &c.UserID, &c.ExchangeType, &c.Name,
 			&c.APIKey, &c.APISecret, &c.APIKeyEncrypted, &c.APISecretEncrypted,
-			&c.KeyVersion, &c.IsActive, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.KeyVersion, &c.IsActive, &c.CreatedAt, &c.UpdatedAt, &c.LastRotatedAt); err != nil {
 			return nil, fmt.Errorf("scan connection: %w", err)
 		}
 		conns = append(conns, c)
@@ -246,12 +247,12 @@ func (q *UserQueries) GetConnectionByID(ctx context.Context, userID, connectionI
 		SELECT id, user_id, exchange_type, name,
 		       COALESCE(api_key, ''), COALESCE(api_secret, ''),
 		       COALESCE(api_key_encrypted, ''), COALESCE(api_secret_encrypted, ''),
-		       COALESCE(key_version, 1), is_active, created_at, updated_at
+		       COALESCE(key_version, 1), is_active, created_at, updated_at, last_rotated_at
 		FROM connections
 		WHERE id = ? AND user_id = ?
 	`, connectionID, userID).Scan(&c.ID, &c.UserID, &c.ExchangeType, &c.Name,
 		&c.APIKey, &c.APISecret, &c.APIKeyEncrypted, &c.APISecretEncrypted,
-		&c.KeyVersion, &c.IsActive, &c.CreatedAt, &c.UpdatedAt)
+		&c.KeyVersion, &c.IsActive, &c.CreatedAt, &c.UpdatedAt, &c.LastRotatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -264,8 +265,14 @@ func (q *UserQueries) GetConnectionByID(ctx context.Context, userID, connectionI
 
 // CreateConnectionEncrypted creates a new connection with encrypted API keys.
 func (q *UserQueries) CreateConnectionEncrypted(ctx context.Context, c Connection) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.UserID == "" {
 		return ErrUserIDRequired
+	}
+	if c.LastRotatedAt.IsZero() {
+		c.LastRotatedAt = time.Now()
 	}
 
 	_, err := q.db.ExecContext(ctx, `
@@ -273,10 +280,10 @@ func (q *UserQueries) CreateConnectionEncrypted(ctx context.Context, c Connectio
 			id, user_id, exchange_type, name,
 			api_key, api_secret,
 			api_key_encrypted, api_secret_encrypted,
-			key_version, is_active, created_at, updated_at
+			key_version, is_active, created_at, updated_at, last_rotated_at
 		)
-		VALUES (?, ?, ?, ?, '', '', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, c.ID, c.UserID, c.ExchangeType, c.Name, c.APIKeyEncrypted, c.APISecretEncrypted, c.KeyVersion)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, COALESCE(?, CURRENT_TIMESTAMP))
+	`, c.ID, c.UserID, c.ExchangeType, c.Name, c.APIKey, c.APISecret, c.APIKeyEncrypted, c.APISecretEncrypted, c.KeyVersion, c.LastRotatedAt)
 
 	return err
 }

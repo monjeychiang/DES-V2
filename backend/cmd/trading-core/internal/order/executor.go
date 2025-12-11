@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"trading-core/internal/events"
+	"trading-core/internal/monitor"
 	"trading-core/pkg/db"
 	exfutcoin "trading-core/pkg/exchanges/binance/futures_coin"
 	exfutusdt "trading-core/pkg/exchanges/binance/futures_usdt"
@@ -44,6 +45,9 @@ type Executor struct {
 	// Optional per-connection gateway pool (multi-user mode)
 	Pool GatewayPool
 
+	// Metrics (optional)
+	Metrics *monitor.SystemMetrics
+
 	mu           sync.RWMutex
 	connGateways map[string]exchange.Gateway // connection_id -> gateway
 }
@@ -67,6 +71,11 @@ func (e *Executor) SetKeyManager(km KeyManager) {
 // SetGatewayPool configures the per-connection gateway pool.
 func (e *Executor) SetGatewayPool(pool GatewayPool) {
 	e.Pool = pool
+}
+
+// SetMetrics configures metrics recorder.
+func (e *Executor) SetMetrics(m *monitor.SystemMetrics) {
+	e.Metrics = m
 }
 
 func (e *Executor) Handle(ctx context.Context, o Order) error {
@@ -107,10 +116,13 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 	status := "NEW"
 	filled := false
 	var execErr error
+	var gwDuration time.Duration
+	var persistDuration time.Duration
 
 	if e.SkipExchange {
 		log.Printf("executor: SkipExchange enabled, not sending order %s to external gateway", o.ID)
 	} else {
+		gwStart := time.Now()
 		gw, venue := e.gatewayForOrder(ctx, o)
 		if gw != nil {
 			res, err := gw.SubmitOrder(ctx, req)
@@ -140,6 +152,9 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 				e.Bus.Publish(events.EventOrderRejected, "no gateway for order")
 			}
 		}
+		if e.Metrics != nil {
+			gwDuration = time.Since(gwStart)
+		}
 	}
 
 	model := db.Order{
@@ -153,9 +168,13 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 		UserID:             o.UserID,
 		CreatedAt:          time.Now(),
 	}
+	persistStart := time.Now()
 	if err := e.DB.CreateOrder(ctx, model); err != nil {
 		log.Printf("executor: store order error: %v", err)
 		return err
+	}
+	if e.Metrics != nil {
+		persistDuration = time.Since(persistStart)
 	}
 
 	// If filled, store a trade row (price may be 0 for market; will be reconciled later)
@@ -190,6 +209,15 @@ func (e *Executor) Handle(ctx context.Context, o Order) error {
 
 	if e.Bus != nil {
 		e.Bus.Publish(events.EventOrderUpdate, model)
+	}
+
+	if e.Metrics != nil {
+		if gwDuration > 0 {
+			e.Metrics.OrderGatewayLatency.RecordDuration(gwDuration)
+		}
+		if persistDuration > 0 {
+			e.Metrics.OrderPersistLatency.RecordDuration(persistDuration)
+		}
 	}
 
 	return execErr

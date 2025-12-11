@@ -38,6 +38,12 @@ type Config struct {
 	// Dry-run simulation
 	DryRunInitialBalance float64
 	DryRunDBPath         string
+	DryRunEnableOrderWAL bool
+	DryRunOrderWALPath   string
+	DryRunFeeRate        float64 // decimal (e.g. 0.0004 = 4 bps)
+	DryRunSlippageBps    float64 // slippage applied on fills (bps)
+	DryRunGwLatencyMinMs int     // simulated gateway latency lower bound
+	DryRunGwLatencyMaxMs int     // simulated gateway latency upper bound
 
 	// Order persistence
 	EnableOrderWAL bool
@@ -45,6 +51,10 @@ type Config struct {
 
 	// Database
 	DBPath string
+
+	// Execution toggle and balance source
+	ExecutionEnabled bool
+	BalanceSource    string // "auto" (default), "exchange", "fixed"
 
 	// Auth / licensing
 	JWTSecret     string
@@ -84,12 +94,20 @@ func Load() (*Config, error) {
 		DryRun:                   getEnv("DRY_RUN", "false") == "true",
 		DryRunInitialBalance:     getEnvFloat("DRY_RUN_INITIAL_BALANCE", 10000.0),
 		DryRunDBPath:             getEnv("DRY_RUN_DB_PATH", "./trading_dry.db"),
+		DryRunEnableOrderWAL:     getEnv("DRY_RUN_ENABLE_ORDER_WAL", "false") == "true",
+		DryRunOrderWALPath:       getEnv("DRY_RUN_ORDER_WAL_PATH", "./data/order_wal_dry"),
+		DryRunFeeRate:            getEnvFloat("DRY_RUN_FEE_RATE", 0.0004),
+		DryRunSlippageBps:        getEnvFloat("DRY_RUN_SLIPPAGE_BPS", 2),
+		DryRunGwLatencyMinMs:     getEnvInt("DRY_RUN_GATEWAY_LATENCY_MIN_MS", 0),
+		DryRunGwLatencyMaxMs:     getEnvInt("DRY_RUN_GATEWAY_LATENCY_MAX_MS", 0),
 		EnableOrderWAL:           getEnv("ENABLE_ORDER_WAL", "true") == "true",
 		OrderWALPath:             getEnv("ORDER_WAL_PATH", "./data/order_wal"),
 		DBPath:                   dbPath,
 		JWTSecret:                getEnv("JWT_SECRET", "dev-secret"),
 		LicenseServer:            getEnv("LICENSE_SERVER", ""),
 		Language:                 getEnv("LANGUAGE", "en"),
+		ExecutionEnabled:         getEnv("EXECUTION_ENABLED", "true") == "true",
+		BalanceSource:            strings.ToLower(getEnv("BALANCE_SOURCE", "auto")),
 	}, nil
 }
 
@@ -115,6 +133,15 @@ func getEnvFloat(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
+		}
+	}
+	return def
+}
+
+func getEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
 		}
 	}
 	return def
