@@ -45,11 +45,29 @@ func (m *MultiUserManager) GetOrCreate(userID string) (*Manager, error) {
 	return mgr, nil
 }
 
-// Get returns the risk manager for a user, or nil if not found.
+// Get returns the risk manager for a user, or nil if not found. It only
+// refreshes activity for existing managers and never creates a new one.
 func (m *MultiUserManager) Get(userID string) *Manager {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.managers[userID]
+	mgr, ok := m.managers[userID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	now := time.Now()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Manager could have been removed between locks; re-read to confirm.
+	if mgr, ok := m.managers[userID]; ok {
+		m.lastSeen[userID] = now
+		return mgr
+	}
+
+	return nil
 }
 
 // Remove removes the risk manager for a user.
